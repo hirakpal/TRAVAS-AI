@@ -330,7 +330,7 @@ Provide thoughtful, balanced itineraries that help travelers experience authenti
                 context_parts.append(f"Budget: ₹{prefs['budget']:,.0f}")
 
             if context_parts:
-                enriched_message = f"ALREADY KNOWN: {' | '.join(context_parts)}\n\nNEW REQUEST: {user_message}"
+                enriched_message = f"CONTEXT FROM EARLIER CONVERSATION:\n{' | '.join(context_parts)}\n\nUSER REQUEST:\n{user_message}"
                 user_message = enriched_message
 
             # Add to local history
