@@ -123,6 +123,8 @@ For general questions, chat naturally without routing."""
         """
         try:
             import re
+            from datetime import datetime, timedelta
+
             # Try to extract common patterns from the message
             message_lower = message.lower()
             updates = {}
@@ -135,25 +137,51 @@ For general questions, chat naturally without routing."""
             if "south goa" in message_lower:
                 updates["accommodation_area"] = "South Goa"
 
-            # Extract budget (look for ₹ or INR patterns)
-            budget_match = re.search(r'₹?([\d,]+)', message)
-            if budget_match:
-                budget_str = budget_match.group(1).replace(',', '')
-                try:
-                    budget = float(budget_str)
-                    updates["budget"] = budget
-                except ValueError:
-                    pass
+            # Extract budget (look for ₹ or INR patterns, pick largest number)
+            budget_matches = re.findall(r'₹?([\d,]+)\s*(?:inr|rupees?)?', message, re.IGNORECASE)
+            if budget_matches:
+                # Take the largest number (usually the main budget)
+                budget_values = [int(b.replace(',', '')) for b in budget_matches if int(b.replace(',', '')) > 100]
+                if budget_values:
+                    updates["budget"] = float(max(budget_values))
+
+            # Extract number of days (look for "5 days", "5-day", etc.)
+            days_match = re.search(r'(\d+)\s*(?:days?|day\s+trip)', message_lower)
+            if days_match:
+                num_days = int(days_match.group(1))
+                updates["num_days"] = num_days
+
+                # If we have check-in date, calculate check-out date
+                current_prefs = self.state_manager.get_preferences()
+                if current_prefs.get("checkin_date"):
+                    try:
+                        # Parse check-in date (e.g., "25 Jul")
+                        checkin_str = current_prefs["checkin_date"]
+                        # Assume current year
+                        checkin_date = datetime.strptime(f"{checkin_str} 2026", "%d %b %Y")
+                        checkout_date = checkin_date + timedelta(days=num_days)
+                        updates["checkout_date"] = checkout_date.strftime("%d %b").lstrip("0")
+                    except:
+                        pass
 
             # Extract dates (look for "25th", "July", patterns)
             if any(month in message_lower for month in ["july", "jul", "august", "aug", "september", "sep"]):
                 # Simple pattern: extract first date-like mention
-                date_match = re.search(r'(\d{1,2}(?:st|nd|rd|th)?)\s*([a-z]+)', message_lower)
+                date_match = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s*([a-z]+)', message_lower)
                 if date_match:
-                    day_str = re.sub(r'[a-z]+', '', date_match.group(1))
+                    day_str = date_match.group(1)
                     month_str = date_match.group(2)
-                    # Store as-is for now (can improve formatting later)
+                    # Store in consistent format
                     updates["checkin_date"] = f"{day_str} {month_str.capitalize()}"
+
+                    # If num_days is already known, calculate checkout
+                    if "num_days" in updates:
+                        try:
+                            checkin_date = datetime.strptime(f"{day_str} {month_str.capitalize()} 2026", "%d %b %Y")
+                            checkout_date = checkin_date + timedelta(days=updates["num_days"])
+                            updates["checkout_date"] = checkout_date.strftime("%d %b").lstrip("0")
+                        except:
+                            pass
 
             # Extract travelers (look for "couple", "2 people", etc.)
             if "couple" in message_lower:
@@ -219,18 +247,27 @@ For general questions, chat naturally without routing."""
             context_info = []
             if prefs.get("destination"):
                 context_info.append(f"Destination: {prefs['destination']}")
+            if prefs.get("accommodation_area"):
+                context_info.append(f"Accommodation area: {prefs['accommodation_area']}")
             if prefs.get("checkin_date"):
                 context_info.append(f"Check-in: {prefs['checkin_date']}")
             if prefs.get("checkout_date"):
                 context_info.append(f"Check-out: {prefs['checkout_date']}")
+            if prefs.get("num_days"):
+                context_info.append(f"Trip duration: {prefs['num_days']} days")
             if prefs.get("num_adults") or prefs.get("num_children"):
                 adults = prefs.get("num_adults", 0)
                 children = prefs.get("num_children", 0)
                 context_info.append(f"Travelers: {adults} adults, {children} children")
             if prefs.get("budget"):
-                context_info.append(f"Budget: {prefs['budget']}")
-            if prefs.get("accommodation_area"):
-                context_info.append(f"Accommodation area: {prefs['accommodation_area']}")
+                # Format budget nicely
+                budget = prefs['budget']
+                if budget > 1000:
+                    context_info.append(f"Budget: ₹{budget:,.0f}")
+                else:
+                    context_info.append(f"Budget: ₹{budget}")
+            if prefs.get("preferred_activities"):
+                context_info.append(f"Interests: {', '.join(prefs['preferred_activities'])}")
 
             enriched_message = message
             if context_info:
