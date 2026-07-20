@@ -148,11 +148,27 @@ separately and will appear right after.
             current_prefs = self.state_manager.get_preferences()
             known = {k: v for k, v in current_prefs.items() if v is not None}
 
+            # Recent conversation context is essential here: a bare number in
+            # the user's message (e.g. "all four and build") is meaningless
+            # without knowing what question it's answering. Without this,
+            # a reply to "want me to bring in all four specialists?" gets
+            # misread as "4 travelers" and silently clobbers a correctly
+            # extracted num_adults from earlier (e.g. "solo" -> 1). Mirrors
+            # the same context-aware fix already applied to
+            # _identify_routing_intents for the analogous "yes both" bug.
+            recent_turns = self.conversation_history[-6:]
+            recent_text = "\n".join(
+                f"{t['role']}: {str(t['content'])[:300]}" for t in recent_turns
+            )
+
             extraction_prompt = f"""Extract travel planning details from the user's message below. Return ONLY a valid JSON object, no other text, no markdown code fences.
 
 Already known info (do not repeat unless it changed): {json.dumps(known)}
 
-User message: "{message}"
+Recent conversation (for context only - use this to understand what any bare numbers or short replies in the latest message actually refer to):
+{recent_text}
+
+Latest user message: "{message}"
 
 Return a JSON object with ONLY the NEW or UPDATED fields found in this message (omit fields not mentioned here):
 {{
@@ -172,7 +188,9 @@ Return a JSON object with ONLY the NEW or UPDATED fields found in this message (
 
 Rules:
 - Only include a field if the message provides new/updated information for it.
-- For traveler counts: "couple" = 2 adults; "family of 4" = 4 adults (use judgment); "me, wife, elderly parents" = 4 adults; explicit numbers like "4 people" = 4 adults unless children are specified separately.
+- For traveler counts: "couple" = 2 adults; "family of 4" = 4 adults (use judgment); "me, wife, elderly parents" = 4 adults; explicit numbers like "4 people"/"party of 4"/"4 of us" = 4 adults unless children are specified separately.
+- IMPORTANT - do NOT extract num_adults from a bare number unless the recent conversation confirms that number is actually describing how many people are traveling. Check what question/offer the latest message is actually replying to first. E.g. if the assistant's last message asked "want me to bring in all four specialists?" and the user replies "all four and build" or "yes all four", that "four" refers to specialists being consulted, NOT the traveler count - do not set num_adults from it (leave it out of the JSON entirely so the already-known value, if any, is preserved). Similarly "day 4", "option 4", "room for 4" (rooms, not people) etc. are not traveler counts.
+- If a message that already established a solo/couple/group traveler count earlier (see "Already known info") doesn't contain any new traveler-count language of its own, do NOT include num_adults in the output at all - never re-derive or guess it from an unrelated number.
 - Note: "elderly parents" or "senior travelers" traveling along is itself a signal worth adding to accessibility_needs (e.g. "comfortable pacing for elderly travelers"), even without an explicit accessibility request.
 - If nothing is extractable, return {{}}.
 - Output must be valid JSON only."""
