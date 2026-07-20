@@ -41,52 +41,50 @@ Based on trip type, determine which agents help:
 - Bazaar → Shopping (if interested in shopping)
 
 PHASE 3: COORDINATE SPECIALISTS
-When routing, explicitly say:
+When you intend to bring in a specialist, ANNOUNCE it or ASK first:
 "Let me check with my hotel specialist (Atithi) about..."
-"My food expert (Annapurna) can recommend..."
+"Want me to bring in my food expert (Annapurna)?"
+Actual routing to specialists happens automatically outside this message based on
+what you and the user say - you don't need to (and can't) call them yourself.
 
 PHASE 4: SYNTHESIZE
 Connect recommendations: "Hotel X is near Attraction Y, and Restaurant Z is walking distance"
+Only do this AFTER real specialist responses have appeared in the conversation as
+separate messages - never invent what a specialist "would" recommend.
+
+## 🔴 CRITICAL: NEVER IMPERSONATE A SPECIALIST
+
+You do NOT have access to any hotel, restaurant, attraction, transport, or shopping
+data or tools yourself - only the 5 specialist agents do, and each is grounded in its
+own mock database. You must NEVER write content in a specialist's voice ("Hi, I'm
+Safar here...", "Atithi here! I recommend...") or invent specific hotel names, prices,
+flight numbers, or attraction details yourself. If you do this, you are fabricating
+information that looks authoritative but is entirely made up - this is worse than not
+answering, because it misleads the traveler's real budget and planning decisions.
+
+Your job in this conversation is ONLY to:
+1. Gather trip preferences conversationally
+2. Announce/offer which specialist(s) should be consulted next
+3. Synthesize genuine specialist responses AFTER they appear as separate messages
+
+If the user agrees to consult a specialist you just offered (e.g. replies "yes",
+"yes both", "sure", "go ahead"), simply acknowledge briefly - do NOT write out what
+you imagine that specialist would say. The real specialist response is generated
+separately and will appear right after.
 
 ## CONVERSATION RULES
 
 ✅ Ask 1-2 questions per turn
 ✅ Remember what they said earlier
-✅ Route when user asks about specific topics
-✅ Synthesize multi-agent responses
 ✅ Acknowledge preferences and constraints
 ✅ Provide alternatives
+✅ Synthesize ONLY genuine specialist responses that have actually appeared
 
 ❌ Don't overwhelm with all agents at once
 ❌ Don't forget earlier messages
 ❌ Don't route before understanding basic needs
 ❌ Don't ask same question twice
-
-## ROUTING KEYWORDS
-
-Route to ATITHI (hotels) when user mentions:
-"hotel", "accommodation", "stay", "room", "resort", "booking", "where to stay"
-
-Route to ANNAPURNA (food) when user mentions:
-"restaurant", "food", "eat", "dining", "cuisine", "vegetarian", "breakfast"
-
-Route to YATRA (tours) when user mentions:
-"attraction", "tour", "visit", "sightseeing", "activity", "what to see", "place"
-
-Route to SAFAR (transport) when user mentions:
-"flight", "train", "bus", "transport", "taxi", "travel", "how to get"
-
-Route to BAZAAR (shopping) when user mentions:
-"shopping", "shop", "mall", "market", "buy", "souvenir"
-
-## IMPORTANT
-
-Only route when:
-1. User asks specific question about an agent's domain
-2. You've gathered enough context
-3. User explicitly asks for that specialist
-
-For general questions, chat naturally without routing."""
+❌ NEVER write fabricated specialist content in your own voice"""
 
     def __init__(self, api_key: Optional[str] = None):
         """
@@ -205,39 +203,88 @@ Rules:
             logger.debug(f"Error extracting preferences: {str(e)}")
             pass
 
-    def _identify_routing_intent(self, message: str) -> Optional[str]:
-        """Identify if message should be routed to a specialist.
+    def _identify_routing_intents(self, message: str) -> List[str]:
+        """Decide which specialist(s) to route to for this message, using an
+        LLM call that sees recent conversation context - not just keyword
+        matching on the message in isolation.
 
-        Uses whole-word matching (regex word boundaries) so keywords like
-        "eat" don't false-positive match inside unrelated words like "great",
-        "bus" inside "business", or "mall" inside "smaller".
+        This replaces a purely keyword-based matcher, which could only
+        recognize routing intent if the message literally contained a domain
+        word like "hotel" or "flight". It could NOT recognize a reply like
+        "yes both" to Sanchalak's own offer ("shall I bring in Safar and
+        Atithi?") as routing intent - "yes both" contains no domain keyword.
+        When that happened, the message fell through to Sanchalak's own
+        free-form chat, which (per its system prompt's "coordinate
+        specialists" instructions) would write fake "Hi, I'm Safar here..."
+        narration with invented flight prices and hotel names, without ever
+        actually calling those agents. This function is context-aware and
+        can return multiple specialists at once (e.g. "yes both" -> both
+        specialists that were just offered).
 
         Args:
             message: User message
 
         Returns:
-            agent_name if routing needed, None otherwise
+            List of specialist names to route to (may be empty).
         """
-        import re
-        message_lower = message.lower()
+        try:
+            import json
+            import re
 
-        routing_keywords = {
-            "atithi": ["hotel", "accommodation", "stay", "room", "resort", "booking", "lodge"],
-            "annapurna": ["restaurant", "food", "eat", "dining", "cuisine", "breakfast", "vegetarian"],
-            "yatra": ["attraction", "tour", "visit", "sightseeing", "activity", "what to see", "place"],
-            "safar": ["flight", "train", "bus", "transport", "taxi", "travel", "how to get"],
-            "bazaar": ["shopping", "shop", "mall", "market", "buy", "souvenir"],
-        }
+            available = [a for a in ["atithi", "annapurna", "yatra", "safar", "bazaar"] if a in self.agents]
+            if not available:
+                return []
 
-        # Check keyword matches using word boundaries to avoid substring false positives
-        for agent_name, keywords in routing_keywords.items():
-            for keyword in keywords:
-                pattern = r'\b' + re.escape(keyword) + r'\b'
-                if re.search(pattern, message_lower) and agent_name in self.agents:
-                    logger.info(f"Routing to {agent_name} (matched: {keyword})")
-                    return agent_name
+            recent_turns = self.conversation_history[-6:]
+            recent_text = "\n".join(
+                f"{t['role']}: {str(t['content'])[:300]}" for t in recent_turns
+            )
 
-        return None
+            classify_prompt = f"""You are deciding which specialist agent(s) should be consulted next in a travel-planning conversation.
+
+Available specialists: atithi (hotels), annapurna (food/restaurants), yatra (attractions/tours), safar (transport/flights/local travel), bazaar (shopping)
+
+Recent conversation:
+{recent_text}
+
+Latest user message: "{message}"
+
+Rules:
+- If the latest user message is an affirmative/agreement (e.g. "yes", "yes both", "sure", "go ahead", "please do", "ok") replying to an assistant message that offered or named specific specialists, return exactly those specialists - even though the word "yes" itself names no domain.
+- If the message explicitly asks about a domain (hotels, food, attractions, transport, shopping), return the matching specialist(s).
+- If the message is just providing preference details (dates, budget, interests, traveler count) with no clear signal to consult a specialist right now, return an empty list - let the conversation continue gathering info.
+- Return MULTIPLE specialists if the message clearly agrees to consult more than one at once.
+- Only return names from this exact list: {available}
+
+Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No other text, no markdown."""
+
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=100,
+                messages=[{"role": "user", "content": classify_prompt}]
+            )
+            text = "".join(
+                block.text for block in response.content if hasattr(block, "text")
+            ).strip()
+
+            match = re.search(r'\[.*?\]', text, re.DOTALL)
+            if not match:
+                return []
+
+            intents = json.loads(match.group(0))
+            seen = set()
+            result = []
+            for name in intents:
+                if name in available and name not in seen:
+                    seen.add(name)
+                    result.append(name)
+
+            if result:
+                logger.info(f"Routing to specialists: {result}")
+            return result
+        except Exception as e:
+            logger.debug(f"Error identifying routing intents: {str(e)}")
+            return []
 
     def _route_to_specialist(self, agent_name: str, message: str) -> str:
         """Route message to specialist agent.
@@ -295,20 +342,25 @@ Rules:
             # Add to local history
             self.conversation_history.append({"role": "user", "content": message})
 
-            # Check if we should route to a specialist
-            routing_intent = self._identify_routing_intent(message)
+            # Check if we should route to one or more specialists (context-aware,
+            # not just keyword matching - see _identify_routing_intents docstring)
+            routing_intents = self._identify_routing_intents(message)
 
-            if routing_intent:
-                # Route to specialist
-                specialist_response = self._route_to_specialist(routing_intent, message)
-                response = f"Let me check with my {routing_intent} specialist...\n\n{specialist_response}"
+            if routing_intents:
+                # Route to each identified specialist for real, and concatenate
+                # their GENUINE responses. Never synthesize this content ourselves.
+                response_parts = []
+                for agent_name in routing_intents:
+                    specialist_response = self._route_to_specialist(agent_name, message)
+                    response_parts.append(f"Let me check with my {agent_name} specialist...\n\n{specialist_response}")
+                response = "\n\n---\n\n".join(response_parts)
 
                 # Update shared state
                 self.state_manager.add_message("assistant", response, agent="sanchalak")
                 self.state_manager.update_agent_response("sanchalak", response)
                 self.state_manager.add_metadata("last_routing", {
                     "orchestrator": "sanchalak",
-                    "routed_to": routing_intent
+                    "routed_to": routing_intents
                 })
 
                 self.conversation_history.append({"role": "assistant", "content": response})
