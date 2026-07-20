@@ -262,6 +262,8 @@ if 'initialized' not in st.session_state:
     st.session_state.validation_result = None
     st.session_state.approval_state = 'PENDING'
     st.session_state.revision_count = 0
+    st.session_state.show_revise_input = False
+    st.session_state.show_reject_options = False
 
 def initialize_session():
     """Initialize agent and session"""
@@ -293,6 +295,29 @@ def initialize_session():
 # MAIN UI
 # ============================================================================
 
+def _reset_trip_session():
+    """Reset all trip-related session state for a brand new trip.
+
+    Shared by both the "New Trip" header button and the "Start Fresh" option
+    offered after a Reject, so the two paths can't drift out of sync.
+    """
+    st.session_state.messages = []
+    st.session_state.itinerary = None
+    st.session_state.itinerary_text = None
+    st.session_state.itinerary_ready = False
+    st.session_state.validation_result = None
+    st.session_state.approval_state = 'PENDING'
+    st.session_state.revision_count = 0
+    st.session_state.show_revise_input = False
+    st.session_state.show_reject_options = False
+    st.session_state.agent = None
+    st.session_state.yojana = None
+    st.session_state.parikshak = None
+    st.session_state.feedback_handler = None
+    st.session_state.initialized = False
+    reset_state_manager()
+
+
 # Header
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -301,19 +326,7 @@ with col1:
 
 with col2:
     if st.button("🔄 New Trip", key="new_trip_btn"):
-        st.session_state.messages = []
-        st.session_state.itinerary = None
-        st.session_state.itinerary_text = None
-        st.session_state.itinerary_ready = False
-        st.session_state.validation_result = None
-        st.session_state.approval_state = 'PENDING'
-        st.session_state.revision_count = 0
-        st.session_state.show_revise_input = False
-        st.session_state.agent = None
-        st.session_state.yojana = None
-        st.session_state.parikshak = None
-        st.session_state.initialized = False
-        reset_state_manager()
+        _reset_trip_session()
         st.rerun()
 
 # Initialize on first load
@@ -384,11 +397,46 @@ with st.sidebar:
 
     with col2:
         if st.button("✗ Reject", disabled=not can_act, key="reject_btn", use_container_width=True):
+            # Actually run this through the feedback handler (previously this
+            # button only printed text - approval_state never changed and
+            # the two follow-up options weren't wired to anything, so typing
+            # "1" or "2" afterward just went to Sanchalak as an ordinary chat
+            # message with no memory of the rejection).
+            action, details = st.session_state.feedback_handler.process_user_feedback(
+                "I reject this itinerary.",
+                st.session_state.itinerary
+            )
+            st.session_state.approval_state = 'REJECTED'
+            st.session_state.show_reject_options = True
+            st.session_state.show_revise_input = False
             st.session_state.messages.append({
                 "role": "system",
-                "content": "Would you like to:\n1. Start fresh with new preferences?\n2. Make specific changes?"
+                "content": details.get(
+                    "message",
+                    "Would you like to:\n1. Start fresh with new preferences?\n2. Make specific changes?"
+                ) if isinstance(details, dict) else
+                    "Would you like to:\n1. Start fresh with new preferences?\n2. Make specific changes?"
             })
             st.rerun()
+
+    # Real follow-up actions after a Reject, replacing the old dead-end text
+    # prompt that asked the user to pick "1" or "2" with no button behind
+    # either option.
+    if st.session_state.get('show_reject_options'):
+        st.caption("What would you like to do?")
+        rcol1, rcol2 = st.columns(2)
+        with rcol1:
+            if st.button("🔄 Start Fresh", key="reject_start_fresh_btn", use_container_width=True):
+                _reset_trip_session()
+                st.rerun()
+        with rcol2:
+            if st.button("✏️ Make Changes", key="reject_make_changes_btn", use_container_width=True):
+                st.session_state.show_reject_options = False
+                st.session_state.show_revise_input = True
+                # Restore a sensible approval_state so the revise flow below
+                # (and the itinerary panel) doesn't stay stuck on REJECTED.
+                st.session_state.approval_state = 'CONDITIONAL' if st.session_state.get('itinerary_ready') else 'PENDING'
+                st.rerun()
 
     if st.session_state.revision_count < 3:
         if st.button("✏️ Revise", disabled=not can_act, key="revise_btn", use_container_width=True):
