@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TRAVAS-AI - Travel Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .session-info {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+
+        .session-info span {
+            padding: 5px 10px;
+            background: #f0f0f0;
+            border-radius: 5px;
+        }
+
+        /* Chat Section */
+        .chat-section {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            height: 600px;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 10px 10px 0 0;
+            font-weight: bold;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #fafafa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 10px;
+            word-wrap: break-word;
+            font-size: 14px;
+        }
+
+        .message.user .message-content {
+            background: #667eea;
+            color: white;
+        }
+
+        .message.assistant .message-content {
+            background: #e8e8e8;
+            color: #333;
+        }
+
+        .message.system .message-content {
+            background: #fff3cd;
+            color: #856404;
+            text-align: center;
+            width: 100%;
+            max-width: 100%;
+        }
+
+        /* Input Section */
+        .input-section {
+            padding: 15px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-section input {
+            flex: 1;
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .input-section button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+
+        .input-section button:hover {
+            background: #5568d3;
+        }
+
+        .input-section button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        /* Status Section */
+        .status-section {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+        }
+
+        .status-title {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            font-size: 14px;
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            color: #666;
+            font-weight: 500;
+        }
+
+        .status-value {
+            color: #333;
+            font-weight: bold;
+        }
+
+        .status-value.pending {
+            color: #ff9800;
+        }
+
+        .status-value.approved {
+            color: #4caf50;
+        }
+
+        .status-value.rejected {
+            color: #f44336;
+        }
+
+        /* Itinerary Section */
+        .itinerary-section {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .itinerary-title {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .day-plan {
+            background: #f9f9f9;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+            border-radius: 5px;
+        }
+
+        .day-title {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .day-activity {
+            margin: 5px 0;
+            padding-left: 20px;
+            color: #555;
+            font-size: 13px;
+        }
+
+        .day-activity:before {
+            content: "→ ";
+            color: #667eea;
+        }
+
+        .budget-info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+            font-size: 13px;
+            border-left: 4px solid #2196f3;
+        }
+
+        .budget-info strong {
+            color: #1976d2;
+        }
+
+        /* Action Buttons */
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .action-btn {
+            flex: 1;
+            min-width: 120px;
+            padding: 12px 15px;
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+
+        .approve-btn {
+            background: #4caf50;
+            color: white;
+        }
+
+        .approve-btn:hover:not(:disabled) {
+            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .revise-btn {
+            background: #2196f3;
+            color: white;
+        }
+
+        .revise-btn:hover:not(:disabled) {
+            background: #0b7dda;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .reject-btn {
+            background: #f44336;
+            color: white;
+        }
+
+        .reject-btn:hover:not(:disabled) {
+            background: #da190b;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .restart-btn {
+            background: #ff9800;
+            color: white;
+        }
+
+        .restart-btn:hover:not(:disabled) {
+            background: #e68900;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .action-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 5px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Alert Messages */
+        .alert {
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            font-size: 13px;
+        }
+
+        .alert.info {
+            background: #e3f2fd;
+            color: #1976d2;
+            border-left: 4px solid #2196f3;
+        }
+
+        .alert.success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-left: 4px solid #4caf50;
+        }
+
+        .alert.warning {
+            background: #fff3e0;
+            color: #e65100;
+            border-left: 4px solid #ff9800;
+        }
+
+        .alert.error {
+            background: #ffebee;
+            color: #c62828;
+            border-left: 4px solid #f44336;
+        }
+
+        /* Footer */
+        .footer {
+            grid-column: 1 / -1;
+            text-align: center;
+            color: white;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+
+        .footer a {
+            color: white;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🌍 TRAVAS-AI - Travel Assistant</h1>
+            <p>AI-powered travel planning with multi-agent orchestration</p>
+            <div class="session-info">
+                <span id="session-display">Session: Creating...</span>
+                <span id="status-display">Status: Initializing...</span>
+                <span id="revision-display">Revisions: 0/3</span>
+            </div>
+        </div>
+
+        <!-- Chat Section -->
+        <div class="chat-section">
+            <div class="chat-header">💬 Chat with Travel Assistant</div>
+            <div class="messages" id="messages">
+                <div class="message system">
+                    <div class="message-content">
+                        Welcome to TRAVAS-AI! Tell me about your dream trip.
+                    </div>
+                </div>
+            </div>
+            <div class="input-section">
+                <input
+                    type="text"
+                    id="messageInput"
+                    placeholder="e.g., I want a 5-day family trip to Goa with budget ₹25,000..."
+                    onkeypress="handleKeyPress(event)"
+                >
+                <button onclick="sendMessage()" id="sendBtn">Send</button>
+            </div>
+        </div>
+
+        <!-- Status Section -->
+        <div class="status-section">
+            <div class="status-title">📊 Session Status</div>
+            <div class="status-item">
+                <span class="status-label">Session ID:</span>
+                <span class="status-value" id="status-session">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Approval State:</span>
+                <span class="status-value pending" id="status-approval">PENDING</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Revisions Used:</span>
+                <span class="status-value" id="status-revisions">0 / 3</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Messages:</span>
+                <span class="status-value" id="status-messages">1</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Server:</span>
+                <span class="status-value" id="status-server">🔴 Offline</span>
+            </div>
+            <div class="action-buttons" id="actionButtons">
+                <button class="action-btn approve-btn" onclick="submitFeedback('approve')" disabled id="approveBtn">
+                    ✓ Approve
+                </button>
+                <button class="action-btn revise-btn" onclick="showReviseInput()" disabled id="reviseBtn">
+                    ✏️ Revise
+                </button>
+                <button class="action-btn reject-btn" onclick="submitFeedback('reject')" disabled id="rejectBtn">
+                    ✗ Reject
+                </button>
+                <button class="action-btn restart-btn" onclick="restartSession()" id="restartBtn">
+                    🔄 New Trip
+                </button>
+            </div>
+            <div id="reviseInputContainer" style="display: none; margin-top: 15px;">
+                <input
+                    type="text"
+                    id="reviseInput"
+                    placeholder="What would you like to change?"
+                    onkeypress="handleReviseKeyPress(event)"
+                    style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 5px;"
+                >
+                <button onclick="submitRevise()" style="width: 100%; padding: 10px; background: #2196f3; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold;">
+                    Submit Revision
+                </button>
+                <button onclick="cancelRevise()" style="width: 100%; padding: 10px; margin-top: 5px; background: #999; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                    Cancel
+                </button>
+            </div>
+        </div>
+
+        <!-- Itinerary Section -->
+        <div class="itinerary-section">
+            <div class="itinerary-title">📋 Travel Itinerary</div>
+            <div id="itineraryContent">
+                <p style="color: #999; text-align: center; padding: 20px;">
+                    Awaiting itinerary from the system...
+                </p>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>TRAVAS-AI v1.0 | Powered by Claude API | <a href="#" onclick="showApiStatus()">API Status</a></p>
+        </div>
+    </div>
+
+    <script>
+        // =====================================================================
+        // CONFIGURATION
+        // =====================================================================
+
+        const API_BASE_URL = 'http://localhost:3000';
+        let sessionId = null;
+        let currentApprovalState = 'PENDING';
+        let revisionCount = 0;
+        const maxRevisions = 3;
+
+        // =====================================================================
+        // INITIALIZATION
+        // =====================================================================
+
+        async function initializeSession() {
+            try {
+                // Check API health
+                const healthRes = await fetch(`${API_BASE_URL}/api/health`);
+                if (!healthRes.ok) throw new Error('API not responding');
+
+                document.getElementById('status-server').textContent = '🟢 Online';
+                document.getElementById('status-server').style.color = '#4caf50';
+
+                // Create new session
+                const chatRes = await fetch(`${API_BASE_URL}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: 'Hello, I need help planning a trip.'
+                    })
+                });
+
+                if (!chatRes.ok) throw new Error('Failed to create session');
+
+                const chatData = await chatRes.json();
+                sessionId = chatData.session_id;
+
+                updateSessionDisplay();
+            } catch (error) {
+                console.error('Initialization error:', error);
+                addMessage('system', '❌ Could not connect to API. Make sure Node.js server is running on port 3000.');
+                document.getElementById('status-server').textContent = '🔴 Offline';
+            }
+        }
+
+        // =====================================================================
+        // MESSAGE HANDLING
+        // =====================================================================
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+
+            if (!message || !sessionId) return;
+
+            // Add user message to display
+            addMessage('user', message);
+            input.value = '';
+
+            // Send to API
+            try {
+                document.getElementById('sendBtn').disabled = true;
+
+                const response = await fetch(`${API_BASE_URL}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId
+                    })
+                });
+
+                if (!response.ok) throw new Error('API error');
+
+                const data = await response.json();
+
+                // Add assistant response
+                addMessage('assistant', data.response);
+
+                // Update status
+                await updateStatus();
+
+                // Enable action buttons if appropriate
+                updateActionButtons();
+
+            } catch (error) {
+                console.error('Send error:', error);
+                addMessage('system', '❌ Error communicating with server.');
+            } finally {
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+
+        function addMessage(role, content) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.textContent = content;
+
+            messageDiv.appendChild(contentDiv);
+            messagesDiv.appendChild(messageDiv);
+
+            // Scroll to bottom
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            // Update message count
+            const allMessages = messagesDiv.querySelectorAll('.message');
+            document.getElementById('status-messages').textContent = allMessages.length;
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        // =====================================================================
+        // FEEDBACK HANDLING
+        // =====================================================================
+
+        function showReviseInput() {
+            document.getElementById('reviseInputContainer').style.display = 'block';
+            document.getElementById('reviseInput').focus();
+        }
+
+        function cancelRevise() {
+            document.getElementById('reviseInputContainer').style.display = 'none';
+            document.getElementById('reviseInput').value = '';
+        }
+
+        function handleReviseKeyPress(event) {
+            if (event.key === 'Enter') {
+                submitRevise();
+            }
+        }
+
+        async function submitRevise() {
+            const feedback = document.getElementById('reviseInput').value.trim();
+            if (!feedback) return;
+
+            await submitFeedback('revise', feedback);
+            cancelRevise();
+        }
+
+        async function submitFeedback(action, feedback = '') {
+            if (!sessionId) return;
+
+            try {
+                document.getElementById('sendBtn').disabled = true;
+
+                const body = {
+                    session_id: sessionId,
+                    feedback: feedback || `${action} this itinerary`,
+                    action: action
+                };
+
+                const response = await fetch(`${API_BASE_URL}/api/feedback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+
+                if (!response.ok) throw new Error('Feedback error');
+
+                const data = await response.json();
+
+                // Add system message
+                addMessage('system', data.message);
+
+                // Update status
+                await updateStatus();
+
+                // Update action buttons
+                updateActionButtons();
+
+                // Show alert for important status changes
+                if (action === 'approve') {
+                    showAlert('Itinerary approved! Ready for booking.', 'success');
+                } else if (action === 'revise') {
+                    showAlert(`Revision submitted (${data.revision_count}/${maxRevisions})`, 'info');
+                } else if (action === 'reject') {
+                    showAlert('Itinerary rejected. Please choose restart or modification.', 'warning');
+                }
+
+            } catch (error) {
+                console.error('Feedback error:', error);
+                showAlert('Error submitting feedback', 'error');
+            } finally {
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+
+        // =====================================================================
+        // STATUS UPDATES
+        // =====================================================================
+
+        async function updateStatus() {
+            if (!sessionId) return;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/status?session_id=${sessionId}`);
+                if (!response.ok) throw new Error('Status error');
+
+                const data = await response.json();
+
+                // Update displays
+                currentApprovalState = data.approval_state;
+                revisionCount = data.revision_count;
+
+                document.getElementById('status-approval').textContent = data.approval_state;
+                document.getElementById('status-approval').className = `status-value ${data.approval_state.toLowerCase()}`;
+                document.getElementById('status-revisions').textContent = `${data.revision_count} / ${data.max_revisions}`;
+
+                // Fetch itinerary
+                await updateItinerary();
+
+            } catch (error) {
+                console.error('Update status error:', error);
+            }
+        }
+
+        async function updateItinerary() {
+            if (!sessionId) return;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/itinerary?session_id=${sessionId}`);
+                if (!response.ok) throw new Error('Itinerary error');
+
+                const data = await response.json();
+
+                if (data.itinerary && data.itinerary.days) {
+                    displayItinerary(data.itinerary);
+                }
+
+            } catch (error) {
+                console.error('Update itinerary error:', error);
+            }
+        }
+
+        function updateSessionDisplay() {
+            document.getElementById('session-display').textContent = `Session: ${sessionId ? sessionId.substring(0, 20) + '...' : 'None'}`;
+            document.getElementById('status-session').textContent = sessionId || '-';
+        }
+
+        // =====================================================================
+        // ITINERARY DISPLAY
+        // =====================================================================
+
+        function displayItinerary(itinerary) {
+            const container = document.getElementById('itineraryContent');
+            let html = '';
+
+            if (itinerary.destination) {
+                html += `
+                    <div class="alert info">
+                        <strong>📍 ${itinerary.destination}</strong> |
+                        ${itinerary.duration} |
+                        <strong>Budget:</strong> ${itinerary.total_budget || itinerary.final_budget || 'N/A'}
+                    </div>
+                `;
+            }
+
+            if (itinerary.days && Array.isArray(itinerary.days)) {
+                itinerary.days.forEach((day, index) => {
+                    const dayNum = day.day || (index + 1);
+                    const date = day.date || '';
+                    const activities = day.activities || [];
+
+                    html += `
+                        <div class="day-plan">
+                            <div class="day-title">
+                                📅 Day ${dayNum}${date ? ' (' + date + ')' : ''}
+                            </div>
+                    `;
+
+                    activities.forEach(activity => {
+                        html += `<div class="day-activity">${activity}</div>`;
+                    });
+
+                    html += `</div>`;
+                });
+            }
+
+            if (itinerary.cost_breakdown) {
+                html += `
+                    <div class="budget-info">
+                        <strong>💰 Cost Breakdown:</strong><br>
+                        ${Object.entries(itinerary.cost_breakdown)
+                            .map(([key, val]) => `${key}: ${val}`)
+                            .join('<br>')}
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html || '<p style="color: #999;">Awaiting itinerary...</p>';
+        }
+
+        // =====================================================================
+        // ACTION BUTTONS
+        // =====================================================================
+
+        function updateActionButtons() {
+            const isApprovalReady = currentApprovalState === 'PENDING' || currentApprovalState === 'CONDITIONAL';
+            const canRevise = revisionCount < maxRevisions;
+
+            document.getElementById('approveBtn').disabled = !isApprovalReady;
+            document.getElementById('reviseBtn').disabled = !isApprovalReady || !canRevise;
+            document.getElementById('rejectBtn').disabled = !isApprovalReady;
+        }
+
+        async function restartSession() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/restart`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId })
+                });
+
+                if (!response.ok) throw new Error('Restart error');
+
+                const data = await response.json();
+
+                // Reset UI
+                sessionId = data.new_session_id;
+                currentApprovalState = 'PENDING';
+                revisionCount = 0;
+
+                document.getElementById('messages').innerHTML = `
+                    <div class="message system">
+                        <div class="message-content">
+                            ${data.message}
+                        </div>
+                    </div>
+                `;
+
+                document.getElementById('itineraryContent').innerHTML = `
+                    <p style="color: #999; text-align: center; padding: 20px;">
+                        Awaiting new itinerary...
+                    </p>
+                `;
+
+                updateSessionDisplay();
+                updateActionButtons();
+                showAlert('New session started!', 'success');
+
+            } catch (error) {
+                console.error('Restart error:', error);
+                showAlert('Error starting new session', 'error');
+            }
+        }
+
+        // =====================================================================
+        // ALERTS
+        // =====================================================================
+
+        function showAlert(message, type = 'info') {
+            const messagesDiv = document.getElementById('messages');
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert ${type}`;
+            alertDiv.textContent = message;
+
+            messagesDiv.appendChild(alertDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            // Auto-remove after 5 seconds
+            setTimeout(() => alertDiv.remove(), 5000);
+        }
+
+        function showApiStatus() {
+            showAlert('API Server: ' + document.getElementById('status-server').textContent, 'info');
+        }
+
+        // =====================================================================
+        // STARTUP
+        // =====================================================================
+
+        window.addEventListener('load', initializeSession);
+    </script>
+</body>
+</html>
