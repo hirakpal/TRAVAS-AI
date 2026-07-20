@@ -11,6 +11,26 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _sanitize_for_logging(text: str) -> str:
+    """Remove special Unicode chars for Windows console logging"""
+    if not isinstance(text, str):
+        return str(text)
+    # Replace common special chars that cause Windows encoding issues
+    replacements = {
+        '₹': 'INR',
+        '✅': 'OK',
+        '❌': 'FAIL',
+        '⚠️': 'WARN',
+        '→': '->',
+        '✓': 'YES',
+        '✗': 'NO'
+    }
+    result = text
+    for char, replacement in replacements.items():
+        result = result.replace(char, replacement)
+    return result
+
+
 @dataclass
 class ItineraryApprovalState:
     """Track approval state of itinerary"""
@@ -83,6 +103,7 @@ class FeedbackHandler:
     def classify_intent(self, user_message: str) -> str:
         """Classify user feedback intent"""
         message_lower = user_message.lower()
+        logger.info(f"Classifying intent for: {_sanitize_for_logging(user_message[:80])}")
 
         # Check APPROVE first (strongest signal)
         if any(kw in message_lower for kw in self.APPROVE_KEYWORDS):
@@ -155,7 +176,7 @@ class FeedbackHandler:
 
     def _handle_revision(self, feedback: str, itinerary: Optional[Dict]) -> Tuple[str, Dict]:
         """Handle revision request"""
-        logger.info(f"User requested revision: {feedback[:100]}...")
+        logger.info(f"User requested revision: {_sanitize_for_logging(feedback[:100])}...")
 
         if not self.approval_state.can_revise():
             return "REJECT", {
@@ -179,7 +200,7 @@ class FeedbackHandler:
 
     def _handle_rejection(self, feedback: str) -> Tuple[str, Dict]:
         """Handle rejection"""
-        logger.info(f"User rejected itinerary: {feedback[:100]}...")
+        logger.info(f"User rejected itinerary: {_sanitize_for_logging(feedback[:100])}...")
 
         # Ask if they want to start completely fresh or make minor changes
         return "REJECT", {
@@ -192,7 +213,7 @@ class FeedbackHandler:
 
     def _handle_clarification(self, message: str) -> Tuple[str, Dict]:
         """Handle clarification request"""
-        logger.info(f"User asked for clarification: {message[:100]}...")
+        logger.info(f"User asked for clarification: {_sanitize_for_logging(message[:100])}...")
 
         return "CLARIFY", {
             "status": "info",
@@ -235,7 +256,7 @@ class FeedbackHandler:
 
     def handle_specific_changes(self, changes: str) -> Tuple[str, Dict]:
         """Handle specific changes after rejection"""
-        logger.info(f"Processing specific changes: {changes[:100]}...")
+        logger.info(f"Processing specific changes: {_sanitize_for_logging(changes[:100])}...")
 
         if not self.approval_state.can_revise():
             return "ESCALATE", {
