@@ -31,9 +31,9 @@ class SanchalakAgent:
         for agent_name in AgentRegistry.list_agents():
             try:
                 self.agents[agent_name] = AgentRegistry.get(agent_name, api_key=self.api_key)
-                logger.info(f"✅ Loaded agent: {agent_name}")
+                logger.info(f"Loaded agent: {agent_name}")
             except Exception as e:
-                logger.error(f"❌ Failed to load agent '{agent_name}': {str(e)}")
+                logger.error(f"Failed to load agent '{agent_name}': {str(e)}")
 
         # Track which agent was used
         self.last_agent_used = None
