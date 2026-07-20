@@ -81,6 +81,15 @@ Create practical plans that minimize travel, maximize experience, and respect al
                 if hasattr(block, "text"):
                     return block.text
             return "Could not generate response."
+        elif response.stop_reason == "max_tokens":
+            # Collect partial response when hitting token limit
+            text_parts = []
+            for block in response.content:
+                if hasattr(block, "text"):
+                    text_parts.append(block.text)
+            if text_parts:
+                return "\n".join(text_parts) + "\n[Response truncated due to token limit]"
+            return "Response hit token limit."
         else:
             return f"Unexpected stop reason: {response.stop_reason}"
 

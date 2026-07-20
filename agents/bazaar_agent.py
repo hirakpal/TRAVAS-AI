@@ -281,6 +281,25 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
         try:
             self.state_manager.add_message("user", user_message, agent="bazaar")
             self.state_manager.set_active_agent("bazaar")
+
+            # Enrich user message with shared state context
+            prefs = self.state_manager.get_preferences()
+            context_parts = []
+            if prefs.get("destination"):
+                context_parts.append(f"Destination: {prefs['destination']}")
+            if prefs.get("accommodation_area"):
+                context_parts.append(f"Area: {prefs['accommodation_area']}")
+            if prefs.get("checkin_date"):
+                context_parts.append(f"Dates: {prefs['checkin_date']} to {prefs.get('checkout_date', '?')}")
+            if prefs.get("num_days"):
+                context_parts.append(f"Duration: {prefs['num_days']} days")
+            if prefs.get("budget"):
+                context_parts.append(f"Budget: ₹{prefs['budget']:,.0f}")
+
+            if context_parts:
+                enriched_message = f"ALREADY KNOWN: {' | '.join(context_parts)}\n\nNEW REQUEST: {user_message}"
+                user_message = enriched_message
+
             self.add_to_history("user", user_message)
             self.tools_used_count = 0
 

@@ -341,6 +341,30 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             # Mark this agent as active
             self.state_manager.set_active_agent("atithi")
 
+            # Enrich user message with shared state context
+            prefs = self.state_manager.get_preferences()
+            context_parts = []
+            if prefs.get("destination"):
+                context_parts.append(f"Destination: {prefs['destination']}")
+            if prefs.get("accommodation_area"):
+                context_parts.append(f"Area: {prefs['accommodation_area']}")
+            if prefs.get("checkin_date"):
+                checkout = prefs.get('checkout_date', '?')
+                context_parts.append(f"Dates: {prefs['checkin_date']} to {checkout}")
+            if prefs.get("num_days"):
+                context_parts.append(f"Duration: {prefs['num_days']} days")
+            if prefs.get("num_adults") or prefs.get("num_children"):
+                travelers = f"{prefs.get('num_adults', 0)} adults"
+                if prefs.get("num_children"):
+                    travelers += f", {prefs['num_children']} children"
+                context_parts.append(f"Travelers: {travelers}")
+            if prefs.get("budget"):
+                context_parts.append(f"Budget: ₹{prefs['budget']:,.0f}")
+
+            if context_parts:
+                enriched_message = f"ALREADY KNOWN: {' | '.join(context_parts)}\n\nNEW REQUEST: {user_message}"
+                user_message = enriched_message
+
             # Add to local history
             self.add_to_history("user", user_message)
 
