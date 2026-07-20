@@ -116,7 +116,7 @@ Be thorough. Be honest. Protect the user experience."""
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2048,
+                max_tokens=4096,
                 system=self.system_prompt,
                 messages=messages,
                 tools=[self._format_tool(tool) for tool in VALIDATION_TOOLS.values()],
@@ -143,6 +143,15 @@ Be thorough. Be honest. Protect the user experience."""
                 if hasattr(block, "text"):
                     return block.text
             return "Could not generate response."
+        elif response.stop_reason == "max_tokens":
+            # Collect partial response when hitting token limit
+            text_parts = []
+            for block in response.content:
+                if hasattr(block, "text"):
+                    text_parts.append(block.text)
+            if text_parts:
+                return "\n".join(text_parts) + "\n[Response truncated due to token limit]"
+            return "Response hit token limit."
         else:
             return f"Unexpected stop reason: {response.stop_reason}"
 
