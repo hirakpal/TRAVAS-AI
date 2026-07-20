@@ -332,6 +332,13 @@ Provide thoughtful, balanced itineraries that help travelers experience authenti
             prefs = self.state_manager.get_preferences()
             user_message = enrich_message_with_context(user_message, prefs)
 
+            # Deterministic coverage pre-check: if the destination isn't in the
+            # verified attractions dataset, force an honest up-front reply (same
+            # across all specialists) instead of gathering/citing general knowledge.
+            _cov = self._coverage_directive("attractions")
+            if _cov:
+                user_message += _cov
+
             # Add to local history
             self.add_to_history("user", user_message)
 

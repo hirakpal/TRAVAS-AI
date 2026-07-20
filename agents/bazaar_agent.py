@@ -301,6 +301,13 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
             prefs = self.state_manager.get_preferences()
             user_message = enrich_message_with_context(user_message, prefs)
 
+            # Deterministic coverage pre-check: if the destination isn't in the
+            # verified shops dataset, force an honest up-front reply (same across
+            # all specialists) instead of gathering/citing general knowledge.
+            _cov = self._coverage_directive("shops")
+            if _cov:
+                user_message += _cov
+
             self.add_to_history("user", user_message)
             self.tools_used_count = 0
 

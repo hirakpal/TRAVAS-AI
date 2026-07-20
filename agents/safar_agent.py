@@ -359,6 +359,14 @@ Provide complete journey planning from start to finish."""
             prefs = self.state_manager.get_preferences()
             user_message = enrich_message_with_context(user_message, prefs)
 
+            # Deterministic coverage pre-check: if the destination city isn't in
+            # the verified transport dataset at all, force an honest up-front
+            # reply. (Route-level gaps within covered cities are still caught by
+            # the search returning zero results.)
+            _cov = self._coverage_directive("transport")
+            if _cov:
+                user_message += _cov
+
             # Add to local history
             self.add_to_history("user", user_message)
 
