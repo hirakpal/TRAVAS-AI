@@ -45,6 +45,10 @@ Create practical plans that minimize travel, maximize experience, and respect al
         self.state_manager = get_state_manager()
         self.current_itinerary: Optional[TravelItinerary] = None
 
+    def chat(self, user_message: str) -> str:
+        """Generic chat - not used by Yojana. Use create_itinerary() or revise_itinerary() instead."""
+        return "Yojana is a specialized synthesis agent. Use create_itinerary(specialist_outputs) or revise_itinerary(feedback) instead."
+
     def _get_response(self, messages: List[Dict]) -> str:
         """Get response from Claude with tool use."""
         try:

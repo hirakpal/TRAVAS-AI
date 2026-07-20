@@ -107,6 +107,10 @@ Be thorough. Be honest. Protect the user experience."""
         self.max_tool_calls = 10
         self.state_manager = get_state_manager()
 
+    def chat(self, user_message: str) -> str:
+        """Generic chat - not used by Parikshak. Use validate_itinerary() instead."""
+        return "Parikshak is a specialized validation agent. Use validate_itinerary(itinerary_json, preferences) instead."
+
     def _get_response(self, messages: List[Dict]) -> str:
         """Get response from Claude with tool use."""
         try:
