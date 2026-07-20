@@ -2,6 +2,7 @@
 
 from typing import Dict, Optional, Type
 from agents.atithi_agent import AtithiAgent
+from agents.annapurna_agent import AnnapurnaAgent
 
 
 class AgentRegistry:
@@ -9,8 +10,8 @@ class AgentRegistry:
 
     _agents: Dict[str, Type] = {
         "atithi": AtithiAgent,
+        "annapurna": AnnapurnaAgent,
         # Future agents will be registered here:
-        # "annapurna": AnnapurnaAgent,
         # "yatra": YatraAgent,
         # "safar": SafarAgent,
         # "bazaar": BazaarAgent,
