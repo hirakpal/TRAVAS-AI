@@ -79,10 +79,36 @@ def _run_validation(itinerary_text: str, prefs: dict) -> str:
         return "⚠️ Validation could not be completed automatically. Please review the itinerary manually before approving."
 
 
+# Markers that appear in Yojana's own "I can't build a draft yet" refusal
+# text (its correct, designed behavior when specialist input is too thin).
+# A refusal is valid and useful to show the user, but it is NOT a finished
+# itinerary. Treating it as one previously caused the sidebar panel to get
+# permanently stuck: the refusal text got written to itinerary_text, which
+# then blocked every future synthesis attempt for the rest of the session
+# (see "once per session" gate below) - so even after a genuine itinerary
+# was later produced, the panel never updated to show it.
+REFUSAL_MARKERS = [
+    "insufficient specialist input",
+    "cannot produce a meaningful draft",
+    "there is no itinerary to validate",
+]
+
+
+def _is_real_itinerary(text: str) -> bool:
+    """True if Yojana actually produced a draft, False if it refused."""
+    if not text:
+        return False
+    lower = text.lower()
+    return not any(marker in lower for marker in REFUSAL_MARKERS)
+
+
 def generate_itinerary() -> bool:
     """Generate the itinerary via Yojana, then validate it via Parikshak,
-    storing both results in session state. Returns True on success, False
-    if there isn't enough context yet (caller should not claim success).
+    storing both results in session state. Returns True only if Yojana
+    produced a genuine draft - False both when there isn't enough context
+    to even try, AND when Yojana tried but correctly refused to fabricate
+    (caller should not claim success, and the session should still be able
+    to retry generation later once real specialist data exists).
     """
     if not _can_generate_itinerary():
         return False
@@ -98,6 +124,8 @@ def generate_itinerary() -> bool:
 
     itinerary_text = st.session_state.yojana.create_itinerary(specialist_outputs)
     st.session_state.itinerary_text = itinerary_text
+    is_real = _is_real_itinerary(itinerary_text)
+    st.session_state.itinerary_ready = is_real
 
     prefs = state["travel_preferences"]
     st.session_state.itinerary = {
@@ -108,9 +136,57 @@ def generate_itinerary() -> bool:
         "summary": itinerary_text
     }
 
-    st.session_state.validation_result = _run_validation(itinerary_text, prefs)
-    st.session_state.approval_state = 'CONDITIONAL'
-    return True
+    if is_real:
+        st.session_state.validation_result = _run_validation(itinerary_text, prefs)
+        st.session_state.approval_state = 'CONDITIONAL'
+    else:
+        # Don't run Parikshak on a refusal (there's nothing to validate) and
+        # don't claim the trip is ready for approval.
+        st.session_state.validation_result = None
+        st.session_state.approval_state = 'PENDING'
+
+    return is_real
+
+
+def _confirm_finalize_intent(user_input: str, agent) -> bool:
+    """Context-aware check: does this message really mean 'generate/finalize
+    the complete itinerary now'?
+
+    The cheap keyword pre-filter (_message_triggers_synthesis) matches bare
+    words like "yes" and "ok" - necessary to catch phrasings like "finalise
+    the itinery", but those same words are also how a user agrees to a
+    completely different question ("shall I bring in Safar and Atithi?" ->
+    "yes both"). Mirrors the fix already applied to specialist routing:
+    an LLM call with recent conversation context disambiguates what the
+    affirmative is actually responding to, instead of guessing from the
+    word alone. Only called after the keyword pre-filter matches, to avoid
+    an extra LLM call on every single message.
+    """
+    try:
+        recent = agent.conversation_history[-6:]
+        recent_text = "\n".join(
+            f"{t['role']}: {str(t['content'])[:300]}" for t in recent
+        )
+        prompt = f"""Recent conversation:
+{recent_text}
+
+Latest user message: "{user_input}"
+
+Does this message mean the user wants their COMPLETE trip itinerary generated/finalized right now - as opposed to just agreeing to a narrower sub-question (like consulting a specific specialist, answering a preference question, or confirming one detail)?
+
+Reply with exactly one word: YES or NO."""
+        response = agent.client.messages.create(
+            model=agent.model,
+            max_tokens=5,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = "".join(
+            b.text for b in response.content if hasattr(b, "text")
+        ).strip().upper()
+        return text.startswith("YES")
+    except Exception as e:
+        logger.debug(f"finalize-intent classification error: {str(e)}")
+        return False
 
 # ============================================================================
 # PAGE CONFIG
@@ -182,6 +258,7 @@ if 'initialized' not in st.session_state:
     st.session_state.messages = []
     st.session_state.itinerary = None
     st.session_state.itinerary_text = None
+    st.session_state.itinerary_ready = False
     st.session_state.validation_result = None
     st.session_state.approval_state = 'PENDING'
     st.session_state.revision_count = 0
@@ -227,6 +304,7 @@ with col2:
         st.session_state.messages = []
         st.session_state.itinerary = None
         st.session_state.itinerary_text = None
+        st.session_state.itinerary_ready = False
         st.session_state.validation_result = None
         st.session_state.approval_state = 'PENDING'
         st.session_state.revision_count = 0
@@ -272,10 +350,12 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✓ Approve", disabled=not can_act, key="approve_btn", use_container_width=True):
-            # If no itinerary has been synthesized yet, generate one now rather
+            # If no itinerary has been genuinely generated yet - either
+            # nothing was attempted, or the only attempt so far was Yojana
+            # correctly refusing to fabricate one - generate one now rather
             # than declaring "approved and finalized" for something that was
             # never actually built.
-            if not st.session_state.itinerary_text:
+            if not st.session_state.get('itinerary_ready'):
                 with st.spinner("🗺️ Generating itinerary before approval..."):
                     generated = generate_itinerary()
                 if not generated:
@@ -419,15 +499,26 @@ with col1:
                 })
 
                 # Trigger itinerary synthesis when user confirms trip details.
-                # Only generate once per session from chat (avoid re-synthesizing
-                # on every subsequent "yes"/"ok" once an itinerary already exists -
-                # the Revise flow handles updates after that point).
-                if not st.session_state.itinerary_text and _message_triggers_synthesis(user_input):
+                # Gated on itinerary_ready (not raw itinerary_text) so a prior
+                # refusal from Yojana never permanently blocks a later, real
+                # synthesis attempt - the Revise flow handles updates once a
+                # real itinerary exists.
+                if (not st.session_state.get('itinerary_ready')
+                        and _message_triggers_synthesis(user_input)
+                        and _confirm_finalize_intent(user_input, st.session_state.agent)):
                     with st.spinner("🗺️ Yojana is synthesizing your itinerary..."):
                         if generate_itinerary():
                             st.session_state.messages.append({
                                 "role": "system",
                                 "content": f"🗺️ Itinerary created by Yojana!\n\n{st.session_state.itinerary_text[:500]}... (see full itinerary on the right →)"
+                            })
+                        elif st.session_state.itinerary_text:
+                            # Yojana explained why it can't build a draft yet -
+                            # show that explanation instead of silently doing
+                            # nothing (previous behavior just logged it).
+                            st.session_state.messages.append({
+                                "role": "system",
+                                "content": f"⚠️ {st.session_state.itinerary_text[:500]}"
                             })
                         else:
                             logger.info("Synthesis triggered but not enough context yet; skipping.")
