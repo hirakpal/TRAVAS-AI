@@ -1,0 +1,131 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "travas-ai"
+version = "0.1.0"
+description = "Travel + AI Agent System - Intelligent travel assistant with specialized agents"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Hirak Pal", email = "hirakpal@gmail.com"}
+]
+keywords = [
+    "travel",
+    "ai",
+    "agents",
+    "llm",
+    "hotel-recommendations",
+    "chatbot"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "openai>=1.35.0",
+    "anthropic>=0.25.0",
+    "google-generativeai>=0.4.0",
+    "requests>=2.31.0",
+    "httpx>=0.25.2",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "dataclasses-json>=0.6.3",
+    "marshmallow>=3.20.1",
+    "python-json-logger>=2.0.7",
+    "colorlog>=6.8.0",
+    "cachetools>=5.3.2",
+    "aiohttp>=3.9.1",
+    "tqdm>=4.66.1",
+    "click>=8.1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.22.0",
+    "pytest-mock>=3.12.0",
+    "black>=23.12.0",
+    "flake8>=6.1.0",
+    "pylint>=3.0.3",
+    "isort>=5.13.2",
+    "mypy>=1.7.1",
+    "ipython>=8.18.1",
+    "ipdb>=0.13.13",
+    "jupyter>=1.0.0",
+]
+
+db = [
+    "sqlalchemy>=2.0.23",
+    "psycopg2-binary>=2.9.9",
+]
+
+all = [
+    "travas-ai[dev,db]",
+]
+
+[project.urls]
+Homepage = "https://github.com/hirakpal/TRAVAS-AI"
+Documentation = "https://github.com/hirakpal/TRAVAS-AI#documentation"
+Repository = "https://github.com/hirakpal/TRAVAS-AI.git"
+Issues = "https://github.com/hirakpal/TRAVAS-AI/issues"
+
+[tool.setuptools]
+packages = ["agents", "config", "models", "llm", "utils"]
+
+[tool.setuptools.package-data]
+travas = ["config/**/*.yaml"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_gitignore = true
+
+[tool.pylint.messages_control]
+disable = [
+    "C0330", "C0326", "C0103", "R0913", "R0914", "W0212", "R0904"
+]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
