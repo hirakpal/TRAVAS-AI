@@ -174,7 +174,6 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2048,
-                temperature=self.temperature,
                 system=self.system_prompt,
                 messages=messages,
                 tools=[self._format_tool(tool) for tool in HOTEL_TOOLS.values()],
