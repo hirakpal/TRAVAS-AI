@@ -8,6 +8,7 @@ import json
 class TravelPreferences(TypedDict):
     """Shared travel preferences across all agents"""
     destination: Optional[str]
+    source_city: Optional[str]  # Departure/origin city
     accommodation_area: Optional[str]  # Area/neighborhood for accommodation (e.g., Candolim, Anjuna)
     checkin_date: Optional[str]
     checkout_date: Optional[str]
@@ -18,6 +19,7 @@ class TravelPreferences(TypedDict):
     dietary_restrictions: Optional[List[str]]
     accessibility_needs: Optional[List[str]]
     preferred_activities: Optional[List[str]]
+    num_days: Optional[int]
 
 
 class ConversationPhase(TypedDict):
@@ -74,6 +76,7 @@ class StateManager:
             conversation_history=[],
             travel_preferences=TravelPreferences(
                 destination=None,
+                source_city=None,
                 accommodation_area=None,
                 checkin_date=None,
                 checkout_date=None,
@@ -84,6 +87,7 @@ class StateManager:
                 dietary_restrictions=None,
                 accessibility_needs=None,
                 preferred_activities=None,
+                num_days=None,
             ),
             active_agents=[],
             agent_responses={},

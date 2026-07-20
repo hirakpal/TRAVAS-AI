@@ -129,13 +129,23 @@ For general questions, chat naturally without routing."""
             message_lower = message.lower()
             updates = {}
 
-            # Extract destination (look for city names)
+            # Extract destination and source cities
+            # Destination cities
             if "goa" in message_lower:
                 updates["destination"] = "Goa"
             if "north goa" in message_lower:
                 updates["accommodation_area"] = "North Goa"
             if "south goa" in message_lower:
                 updates["accommodation_area"] = "South Goa"
+
+            # Source/departure cities (look for cities mentioned at start or after keywords)
+            source_cities = ["bangalore", "bengaluru", "delhi", "mumbai", "pune", "kolkata", "hyderabad", "chennai", "kochi", "ahmedabad"]
+            for city in source_cities:
+                if city in message_lower:
+                    # Check if it's likely a departure city (mentioned near keywords like "from", "departing", or standalone)
+                    if f"from {city}" in message_lower or f"{city}," in message_lower or message_lower.startswith(city):
+                        updates["source_city"] = city.capitalize()
+                        break
 
             # Extract budget (look for ₹ or INR patterns, pick largest number)
             budget_matches = re.findall(r'₹?([\d,]+)\s*(?:inr|rupees?)?', message, re.IGNORECASE)
@@ -245,6 +255,8 @@ For general questions, chat naturally without routing."""
             prefs = state["travel_preferences"]
 
             context_info = []
+            if prefs.get("source_city"):
+                context_info.append(f"Departing from: {prefs['source_city']}")
             if prefs.get("destination"):
                 context_info.append(f"Destination: {prefs['destination']}")
             if prefs.get("accommodation_area"):

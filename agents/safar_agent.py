@@ -344,6 +344,8 @@ Provide complete journey planning from start to finish."""
             # Enrich user message with shared state context
             prefs = self.state_manager.get_preferences()
             context_parts = []
+            if prefs.get("source_city"):
+                context_parts.append(f"Departing from: {prefs['source_city']}")
             if prefs.get("destination"):
                 context_parts.append(f"Destination: {prefs['destination']}")
             if prefs.get("accommodation_area"):
