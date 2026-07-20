@@ -323,7 +323,6 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             with self.client.messages.stream(
                 model=self.model,
                 max_tokens=2048,
-                temperature=self.temperature,
                 system=self.system_prompt,
                 messages=messages,
                 tools=[self._format_tool(tool) for tool in HOTEL_TOOLS.values()],
@@ -354,7 +353,6 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         info = super().get_agent_info()
         info.update({
             "model": self.model,
-            "temperature": self.temperature,
             "available_tools": len(HOTEL_TOOLS),
             "tools": [t.name for t in HOTEL_TOOLS.values()]
         })
