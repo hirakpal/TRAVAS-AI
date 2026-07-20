@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Any
 import anthropic
 
 from agents.base_agent import BaseAgent
-from agents.shared_state import get_state_manager
+from agents.shared_state import get_state_manager, format_budget
 from tools.planning_tools import PLANNING_TOOLS
 from models.itinerary import TravelItinerary, DayPlan
 from utils.logger import get_logger
@@ -14,15 +14,35 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-class YojanaAgent(BaseAgent):
-    """Travel Plan Synthesizer - creates, validates, and revises itineraries."""
+def _load_yojana_system_prompt() -> str:
+    """Load the Yojana gold system prompt using a path relative to this file.
 
-    SYSTEM_PROMPT = open(
-        "YOJANA_SYSTEM_PROMPT_GOLD.md", "r"
-    ).read() if os.path.exists("YOJANA_SYSTEM_PROMPT_GOLD.md") else """You are Yojana, the Travel Plan Synthesizer.
+    Using a bare relative path (e.g. "YOJANA_SYSTEM_PROMPT_GOLD.md") depends
+    on the process's current working directory at import time, which varies
+    by launch method (streamlit run, pytest, different CWDs, etc.) and can
+    silently fall back to the generic 4-line prompt instead of the intended
+    ~2500-line gold prompt with no error raised.
+    """
+    gold_prompt_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "YOJANA_SYSTEM_PROMPT_GOLD.md"
+    )
+    if os.path.exists(gold_prompt_path):
+        with open(gold_prompt_path, "r", encoding="utf-8") as f:
+            return f.read()
+    logger.warning(
+        f"YOJANA_SYSTEM_PROMPT_GOLD.md not found at {gold_prompt_path}; "
+        "falling back to generic Yojana prompt."
+    )
+    return """You are Yojana, the Travel Plan Synthesizer.
 You synthesize specialist agent recommendations into coherent, optimized travel itineraries.
 You NEVER search independently. You work with outputs from Atithi, Annapurna, Yatra, Safar, Bazaar.
 Create practical plans that minimize travel, maximize experience, and respect all constraints."""
+
+
+class YojanaAgent(BaseAgent):
+    """Travel Plan Synthesizer - creates, validates, and revises itineraries."""
+
+    SYSTEM_PROMPT = _load_yojana_system_prompt()
 
     def __init__(
         self,
@@ -141,6 +161,44 @@ Create practical plans that minimize travel, maximize experience, and respect al
 
         return self._get_response(updated_messages)
 
+    def _format_trip_facts(self) -> str:
+        """Build an authoritative summary of trip facts from shared state.
+
+        Specialist recommendations are free text and may not consistently
+        restate destination/dates/budget/travelers - relying on those being
+        embedded correctly in prose is fragile (e.g. a specialist mentioning
+        a day-trip area can get mistaken for the accommodation base). This
+        gives Yojana a single, explicit, structured source of truth to
+        synthesize against.
+        """
+        prefs = self.state_manager.get_preferences()
+        facts = []
+        if prefs.get("destination"):
+            facts.append(f"- Destination: {prefs['destination']}")
+        if prefs.get("accommodation_area"):
+            facts.append(f"- Accommodation area (where they are BASED): {prefs['accommodation_area']}")
+        if prefs.get("source_city"):
+            facts.append(f"- Departing from: {prefs['source_city']}")
+        if prefs.get("checkin_date"):
+            facts.append(f"- Check-in: {prefs['checkin_date']}")
+        if prefs.get("checkout_date"):
+            facts.append(f"- Check-out: {prefs['checkout_date']}")
+        if prefs.get("num_days"):
+            facts.append(f"- Trip duration: {prefs['num_days']} days")
+        if prefs.get("num_adults") or prefs.get("num_children"):
+            travelers = f"{prefs.get('num_adults', 0)} adults"
+            if prefs.get("num_children"):
+                travelers += f", {prefs['num_children']} children"
+            facts.append(f"- Travelers: {travelers}")
+        if prefs.get("budget"):
+            facts.append(f"- Total budget: {format_budget(prefs['budget'])}")
+        if prefs.get("preferred_activities"):
+            facts.append(f"- Stated interests: {', '.join(prefs['preferred_activities'])}")
+
+        if not facts:
+            return "No structured trip facts captured yet - infer from specialist recommendations below."
+        return "\n".join(facts)
+
     def create_itinerary(self, specialist_outputs: Dict) -> str:
         """Create initial itinerary from specialist recommendations."""
         try:
@@ -148,6 +206,11 @@ Create practical plans that minimize travel, maximize experience, and respect al
 
             context = f"""
 Based on specialist recommendations, create a draft travel itinerary:
+
+AUTHORITATIVE TRIP FACTS (from confirmed user preferences - these override anything
+that conflicts in the specialist text below, e.g. if a specialist mentions a
+different area, treat the accommodation area below as where the traveler is BASED):
+{self._format_trip_facts()}
 
 HOTEL RECOMMENDATIONS (Atithi):
 {specialist_outputs.get('atithi', 'Not available')}

@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 import anthropic
 
 from agents.base_agent import BaseAgent
-from agents.shared_state import get_state_manager
+from agents.shared_state import get_state_manager, format_budget
 from tools.shopping_tools import SHOPPING_TOOLS
 from models.shopping import ShoppingPreferences
 from utils.logger import get_logger
@@ -294,7 +294,7 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
             if prefs.get("num_days"):
                 context_parts.append(f"Duration: {prefs['num_days']} days")
             if prefs.get("budget"):
-                context_parts.append(f"Budget: ₹{prefs['budget']:,.0f}")
+                context_parts.append(f"Budget: {format_budget(prefs['budget'])}")
 
             if context_parts:
                 enriched_message = f"CONTEXT FROM EARLIER CONVERSATION:\n{' | '.join(context_parts)}\n\nUSER REQUEST:\n{user_message}"

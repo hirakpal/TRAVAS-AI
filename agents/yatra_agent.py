@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Generator, Any
 import anthropic
 
 from agents.base_agent import BaseAgent
-from agents.shared_state import get_state_manager
+from agents.shared_state import get_state_manager, format_budget
 from tools.attraction_tools import ATTRACTION_TOOLS
 from models.attraction import ActivityPreferences
 from utils.logger import get_logger
@@ -327,7 +327,7 @@ Provide thoughtful, balanced itineraries that help travelers experience authenti
                     travelers += f", {prefs['num_children']} children"
                 context_parts.append(f"Travelers: {travelers}")
             if prefs.get("budget"):
-                context_parts.append(f"Budget: ₹{prefs['budget']:,.0f}")
+                context_parts.append(f"Budget: {format_budget(prefs['budget'])}")
 
             if context_parts:
                 enriched_message = f"CONTEXT FROM EARLIER CONVERSATION:\n{' | '.join(context_parts)}\n\nUSER REQUEST:\n{user_message}"

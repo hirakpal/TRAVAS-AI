@@ -5,6 +5,22 @@ from datetime import datetime
 import json
 
 
+def format_budget(value: Any) -> str:
+    """Safely format a budget value as a rupee string.
+
+    Defensive against the value being a string, None, or otherwise
+    non-numeric (e.g. if an LLM-based extractor ever returns "20000 INR"
+    instead of a plain number) so formatting never raises and silently
+    swallows a real specialist response inside a try/except.
+    """
+    if value is None:
+        return "Not specified"
+    try:
+        return f"₹{float(value):,.0f}"
+    except (ValueError, TypeError):
+        return f"₹{value}"
+
+
 class TravelPreferences(TypedDict):
     """Shared travel preferences across all agents"""
     destination: Optional[str]
@@ -118,10 +134,24 @@ class StateManager:
         self._update_timestamp()
 
     def update_preferences(self, updates: dict):
-        """Update travel preferences"""
+        """Update travel preferences.
+
+        Keys not present in TravelPreferences are silently dropped by design
+        (the TypedDict is the schema contract), but we log them so a future
+        schema mismatch (e.g. an LLM extractor returning "days" instead of
+        "num_days") is discoverable instead of silently vanishing.
+        """
+        unknown_keys = []
         for key, value in updates.items():
             if key in self.state["travel_preferences"]:
                 self.state["travel_preferences"][key] = value
+            else:
+                unknown_keys.append(key)
+        if unknown_keys:
+            import logging
+            logging.getLogger(__name__).debug(
+                f"update_preferences: ignoring unknown keys not in TravelPreferences schema: {unknown_keys}"
+            )
         self._update_timestamp()
 
     def set_active_agent(self, agent_name: str):

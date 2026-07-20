@@ -1,6 +1,7 @@
 """Feedback Handler - Manages user approval, revision, and rejection flow"""
 
 import json
+import re
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,6 +10,19 @@ from agents.shared_state import get_state_manager
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _contains_keyword(text: str, keywords: list) -> bool:
+    """Check if text contains any keyword as a whole word/phrase (not a substring).
+
+    Prevents false positives like "yes" matching inside "yesterday", or
+    "no" matching inside "know".
+    """
+    for kw in keywords:
+        pattern = r'\b' + re.escape(kw) + r'\b'
+        if re.search(pattern, text):
+            return True
+    return False
 
 
 def _sanitize_for_logging(text: str) -> str:
@@ -106,23 +120,23 @@ class FeedbackHandler:
         logger.info(f"Classifying intent for: {_sanitize_for_logging(user_message[:80])}")
 
         # Check APPROVE first (strongest signal)
-        if any(kw in message_lower for kw in self.APPROVE_KEYWORDS):
+        if _contains_keyword(message_lower, self.APPROVE_KEYWORDS):
             return "APPROVE"
 
         # Check REJECT (strong signal)
-        if any(kw in message_lower for kw in self.REJECT_KEYWORDS):
+        if _contains_keyword(message_lower, self.REJECT_KEYWORDS):
             return "REJECT"
 
         # Check REVISE
-        if any(kw in message_lower for kw in self.REVISE_KEYWORDS):
+        if _contains_keyword(message_lower, self.REVISE_KEYWORDS):
             return "REVISE"
 
         # Check CLARIFY
-        if any(kw in message_lower for kw in self.CLARIFY_KEYWORDS):
+        if _contains_keyword(message_lower, self.CLARIFY_KEYWORDS):
             return "CLARIFY"
 
         # Default to REVISE if contains specific changes
-        if any(phrase in message_lower for phrase in ["day", "meal", "activity", "restaurant", "hotel"]):
+        if _contains_keyword(message_lower, ["day", "meal", "activity", "restaurant", "hotel"]):
             return "REVISE"
 
         return "CLARIFY"

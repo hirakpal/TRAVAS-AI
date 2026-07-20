@@ -3,16 +3,6 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
-# Import after class definitions to avoid circular imports
-_state_manager = None
-def get_shared_state_manager():
-    """Get the shared state manager singleton"""
-    global _state_manager
-    if _state_manager is None:
-        from agents.shared_state import get_state_manager
-        _state_manager = get_state_manager()
-    return _state_manager
-
 
 @dataclass
 class Message:

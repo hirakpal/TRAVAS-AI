@@ -11,7 +11,7 @@ from datetime import datetime
 import anthropic
 
 from agents.base_agent import BaseAgent, Message
-from agents.shared_state import get_state_manager
+from agents.shared_state import get_state_manager, format_budget
 from tools.hotel_tools import HOTEL_TOOLS, list_tools
 from models.preferences import TravelPreferences
 from utils.logger import get_logger
@@ -359,7 +359,7 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
                     travelers += f", {prefs['num_children']} children"
                 context_parts.append(f"Travelers: {travelers}")
             if prefs.get("budget"):
-                context_parts.append(f"Budget: ₹{prefs['budget']:,.0f}")
+                context_parts.append(f"Budget: {format_budget(prefs['budget'])}")
 
             if context_parts:
                 enriched_message = f"CONTEXT FROM EARLIER CONVERSATION:\n{' | '.join(context_parts)}\n\nUSER REQUEST:\n{user_message}"

@@ -99,9 +99,17 @@ For general questions, chat naturally without routing."""
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.model = "claude-opus-4-8"
 
-        # Initialize available agents from registry
+        # Initialize available conversational specialists from registry.
+        # Yojana (synthesizer) and Parikshak (validator) are excluded here -
+        # they're orchestration-only agents never reached via
+        # _identify_routing_intent's keyword routing, and are owned/driven
+        # separately by the app layer (e.g. streamlit_app.py) once enough
+        # specialist recommendations have been gathered.
+        CONVERSATIONAL_SPECIALISTS = {"atithi", "annapurna", "yatra", "safar", "bazaar"}
         self.agents = {}
         for agent_name in AgentRegistry.list_agents():
+            if agent_name not in CONVERSATIONAL_SPECIALISTS:
+                continue
             try:
                 self.agents[agent_name] = AgentRegistry.get(agent_name, api_key=self.api_key)
                 logger.info(f"Loaded specialist: {agent_name}")
@@ -196,12 +204,17 @@ Rules:
     def _identify_routing_intent(self, message: str) -> Optional[str]:
         """Identify if message should be routed to a specialist.
 
+        Uses whole-word matching (regex word boundaries) so keywords like
+        "eat" don't false-positive match inside unrelated words like "great",
+        "bus" inside "business", or "mall" inside "smaller".
+
         Args:
             message: User message
 
         Returns:
             agent_name if routing needed, None otherwise
         """
+        import re
         message_lower = message.lower()
 
         routing_keywords = {
@@ -212,17 +225,26 @@ Rules:
             "bazaar": ["shopping", "shop", "mall", "market", "buy", "souvenir"],
         }
 
-        # Check keyword matches
+        # Check keyword matches using word boundaries to avoid substring false positives
         for agent_name, keywords in routing_keywords.items():
             for keyword in keywords:
-                if keyword in message_lower and agent_name in self.agents:
+                pattern = r'\b' + re.escape(keyword) + r'\b'
+                if re.search(pattern, message_lower) and agent_name in self.agents:
                     logger.info(f"Routing to {agent_name} (matched: {keyword})")
                     return agent_name
 
         return None
 
     def _route_to_specialist(self, agent_name: str, message: str) -> str:
-        """Route message to specialist agent with full context.
+        """Route message to specialist agent.
+
+        Note: We pass the RAW user message here. Each specialist's own
+        chat() method reads shared state directly and enriches the message
+        with a "CONTEXT FROM EARLIER CONVERSATION" block itself. Enriching
+        here as well would nest a second context block inside the first,
+        wasting tokens and risking confused extraction - shared state is
+        the single source of truth, and each specialist owns its own
+        context-building from it.
 
         Args:
             agent_name: Name of specialist agent
@@ -238,48 +260,7 @@ Rules:
         self.last_agent_used = agent_name
 
         try:
-            # Enrich message with shared state context
-            state = self.state_manager.get_state()
-            prefs = state["travel_preferences"]
-
-            context_info = []
-            if prefs.get("source_city"):
-                context_info.append(f"Departing from: {prefs['source_city']}")
-            if prefs.get("destination"):
-                context_info.append(f"Destination: {prefs['destination']}")
-            if prefs.get("accommodation_area"):
-                context_info.append(f"Accommodation area: {prefs['accommodation_area']}")
-            if prefs.get("checkin_date"):
-                context_info.append(f"Check-in: {prefs['checkin_date']}")
-            if prefs.get("checkout_date"):
-                context_info.append(f"Check-out: {prefs['checkout_date']}")
-            if prefs.get("num_days"):
-                context_info.append(f"Trip duration: {prefs['num_days']} days")
-            if prefs.get("num_adults") or prefs.get("num_children"):
-                adults = prefs.get("num_adults", 0)
-                children = prefs.get("num_children", 0)
-                context_info.append(f"Travelers: {adults} adults, {children} children")
-            if prefs.get("budget"):
-                # Format budget nicely
-                budget = prefs['budget']
-                if budget > 1000:
-                    context_info.append(f"Budget: ₹{budget:,.0f}")
-                else:
-                    context_info.append(f"Budget: ₹{budget}")
-            if prefs.get("preferred_activities"):
-                context_info.append(f"Interests: {', '.join(prefs['preferred_activities'])}")
-
-            enriched_message = message
-            if context_info:
-                enriched_message = f"""
-CONTEXT FROM EARLIER CONVERSATION:
-{' | '.join(context_info)}
-
-USER REQUEST:
-{message}
-"""
-
-            response = agent.chat(enriched_message)
+            response = agent.chat(message)
             logger.info(f"Specialist {agent_name} responded")
             return response
         except Exception as e:
