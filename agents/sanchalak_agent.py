@@ -13,7 +13,7 @@ import anthropic
 from agents.registry import AgentRegistry
 from agents.shared_state import (
     get_state_manager, reset_state_manager,
-    format_budget, is_real_itinerary,
+    format_budget, is_real_itinerary, SPECIALIST_AGENT_NAMES,
 )
 from agents.yojana_agent import YojanaAgent
 from agents.parikshak_agent import ParikshakAgent
@@ -34,10 +34,6 @@ FINALIZE_TRIGGER_KEYWORDS = [
     "book it", "finalize", "finalise", "finalized", "finalised",
     "generate itinerary", "create itinerary", "make the itinerary",
 ]
-
-# agent_responses also stores a "sanchalak" entry every turn, so only these five
-# count as genuine specialist consultations for the synthesis gate.
-SPECIALIST_KEYS = {"atithi", "annapurna", "yatra", "safar", "bazaar"}
 
 MAX_REVISIONS = 3
 
@@ -140,10 +136,9 @@ separately and will appear right after.
         # keyword routing. They ARE owned by Sanchalak (built below) and driven
         # by the workflow methods once enough specialist input exists; they're
         # just not conversational specialists the user chats with directly.
-        CONVERSATIONAL_SPECIALISTS = {"atithi", "annapurna", "yatra", "safar", "bazaar"}
         self.agents = {}
         for agent_name in AgentRegistry.list_agents():
-            if agent_name not in CONVERSATIONAL_SPECIALISTS:
+            if agent_name not in SPECIALIST_AGENT_NAMES:
                 continue
             try:
                 self.agents[agent_name] = AgentRegistry.get(agent_name, api_key=self.api_key)
@@ -580,15 +575,19 @@ Reply with exactly one word: YES or NO."""
     def can_generate_itinerary(self) -> bool:
         """Gate: is there enough context to synthesize an itinerary?
 
-        Requires a destination and at least 2 GENUINE specialist responses.
-        Still a heuristic (a specialist that only asked a clarifying question
-        counts the same as one that returned real recommendations) - but this
-        method is the single place the gate lives, so a future upgrade to
-        structured per-specialist completion reporting has one clear home.
+        Destination known AND at least 2 specialists have reported COMPLETE -
+        i.e. actually delivered grounded recommendations (status == "complete",
+        which itself requires the specialist to have grounded in real data), not
+        merely appeared in agent_responses. This is the deterministic upgrade
+        over the old 'at least 2 specialists responded' heuristic, which counted
+        a specialist that only asked a clarifying question the same as one that
+        returned real recommendations. Readiness is DERIVED from the stored
+        per-specialist status - it is never a separately maintained flag, so it
+        cannot go stale.
         """
-        state = self.state_manager.get_state()
-        real_specialist_responses = SPECIALIST_KEYS & set(state["agent_responses"].keys())
-        return bool(state["travel_preferences"].get("destination")) and len(real_specialist_responses) >= 2
+        if not self.state_manager.get_preferences().get("destination"):
+            return False
+        return len(self.state_manager.get_completed_specialists()) >= 2
 
     def generate_itinerary(self) -> bool:
         """Run Yojana to draft (which also runs the forced structured
@@ -770,6 +769,10 @@ Reply with exactly one word: YES or NO."""
             "max_revisions": MAX_REVISIONS,
             "can_revise": self.can_revise(),
             "can_act": len(self.messages) > 1,
+            # Per-specialist completion signal (the "traffic light") + the
+            # derived readiness the gate uses.
+            "specialist_status": dict(self.state_manager.get_state().get("agent_status", {})),
+            "completed_specialists": self.state_manager.get_completed_specialists(),
         }
 
     def get_orchestrator_info(self) -> Dict:

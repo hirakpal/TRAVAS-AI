@@ -376,6 +376,11 @@ Provide complete journey planning from start to finish."""
             # Add to local history
             self.add_to_history("assistant", response)
 
+            # Emit structured completion status (status/confidence/missing_information)
+            # so the synthesis gate is derived from what the agent actually did,
+            # not from whether it merely responded.
+            self._emit_completion_status("safar")
+
             return response
 
         except Exception as e:

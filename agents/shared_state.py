@@ -5,6 +5,12 @@ from datetime import datetime
 import json
 
 
+# The five conversational specialist agents. Excludes Sanchalak (the
+# orchestrator) and Yojana/Parikshak (synthesis/validation, not user-facing
+# specialists). Single source of truth so callers don't each hard-code the set.
+SPECIALIST_AGENT_NAMES = ("atithi", "annapurna", "yatra", "safar", "bazaar")
+
+
 def format_budget(value: Any) -> str:
     """Safely format a budget value as a rupee string.
 
@@ -125,6 +131,23 @@ class ConversationPhase(TypedDict):
     status: str  # "gathering_info", "processing", "ready_to_recommend"
 
 
+class AgentCompletionStatus(TypedDict):
+    """Structured completion signal a specialist reports about itself.
+
+    This replaces the old heuristic of inferring 'is this specialist done?'
+    from whether it merely appears in agent_responses (which became true on its
+    FIRST reply, even if that reply was only a clarifying question). Here the
+    specialist itself reports its state, and 'complete' is additionally gated on
+    `grounded` (it actually retrieved verified data) so it can't self-declare
+    done while fabricating.
+    """
+    status: str                       # "gathering" | "complete"
+    confidence: Optional[float]       # 0.0-1.0 fit of delivered recs; None/0 while gathering
+    missing_information: List[str]    # what it still needs / couldn't verify
+    grounded: bool                    # has it ever successfully called a grounding tool
+    updated_at: str
+
+
 class SharedConversationState(TypedDict):
     """Shared state that all agents can read/write"""
 
@@ -139,6 +162,7 @@ class SharedConversationState(TypedDict):
     # Multi-agent tracking
     active_agents: List[str]  # Which agents are involved
     agent_responses: dict  # {agent_name: last_response}
+    agent_status: dict  # {agent_name: AgentCompletionStatus} - structured per-specialist completion
     orchestrator_active: bool  # Is Sanchalak routing?
 
     # Current phase info
@@ -187,6 +211,7 @@ class StateManager:
             ),
             active_agents=[],
             agent_responses={},
+            agent_status={},
             orchestrator_active=False,
             current_phase=ConversationPhase(
                 current_agent="",
@@ -261,6 +286,62 @@ class StateManager:
         """Store agent's last response"""
         self.state["agent_responses"][agent_name] = response
         self._update_timestamp()
+
+    # --- Structured completion status (replaces heuristic "has it responded?") -
+    def update_agent_status(
+        self,
+        agent_name: str,
+        status: str,
+        confidence: Optional[float] = None,
+        missing_information: Optional[List[str]] = None,
+        grounded: bool = False,
+    ):
+        """Store a specialist's structured completion signal.
+
+        This is the agent's OWN report of where it is, not a flag flipped by
+        surrounding code - so it can't drift out of sync with what the agent
+        actually did the way a hand-maintained boolean would.
+        """
+        self.state["agent_status"][agent_name] = {
+            "status": status,
+            "confidence": confidence,
+            "missing_information": missing_information or [],
+            "grounded": bool(grounded),
+            "updated_at": datetime.now().isoformat(),
+        }
+        self._update_timestamp()
+
+    def get_agent_status(self, agent_name: str) -> Optional[dict]:
+        """Get a specialist's last reported completion status (or None)."""
+        return self.state["agent_status"].get(agent_name)
+
+    def is_specialist_complete(self, agent_name: str) -> bool:
+        """Derived: has this specialist reported it finished delivering?
+
+        Single source of truth computed from the stored status - never a
+        separately-maintained boolean, so it can't go stale.
+        """
+        st = self.state["agent_status"].get(agent_name)
+        return bool(st) and st.get("status") == "complete"
+
+    def get_completed_specialists(self) -> List[str]:
+        """Derived: which of the five specialists have completed."""
+        return [n for n in SPECIALIST_AGENT_NAMES if self.is_specialist_complete(n)]
+
+    def all_required_complete(self, required: Optional[set] = None) -> bool:
+        """Derived: are all required specialists complete?
+
+        If `required` is omitted, it defaults to the specialists actually
+        consulted so far (those in active_agents) - so "done" means "every
+        specialist we brought into this trip has delivered", not a fixed count.
+        Returns False when nothing has been consulted yet.
+        """
+        if required is None:
+            required = set(self.state["active_agents"]) & set(SPECIALIST_AGENT_NAMES)
+        required = set(required)
+        if not required:
+            return False
+        return all(self.is_specialist_complete(n) for n in required)
 
     def update_recommendations(self, agent_type: str, recommendations: List[dict]):
         """Update recommendations from any agent"""

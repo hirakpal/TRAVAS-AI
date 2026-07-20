@@ -3,6 +3,51 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# Tool a specialist is forced to call to self-report progress. Kept as a plain
+# dict (not a Tool class) because it's only ever used for the forced status call
+# in _emit_completion_status, never in a normal tool-use loop.
+STATUS_REPORT_TOOL = {
+    "name": "report_status",
+    "description": (
+        "Report your current progress for this traveler so the orchestrator knows "
+        "whether your part of the plan is done. Answer honestly, based only on what "
+        "has actually happened in the conversation."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["gathering", "complete"],
+                "description": (
+                    "'complete' ONLY if you have already delivered concrete, verified "
+                    "recommendations from your search tools. 'gathering' if you are still "
+                    "collecting preferences, just asked the user a question, or have not "
+                    "yet presented verified results."
+                ),
+            },
+            "confidence": {
+                "type": "number",
+                "description": (
+                    "0.0-1.0: how well your delivered recommendations meet the traveler's "
+                    "stated needs. Use 0 if you are still gathering."
+                ),
+            },
+            "missing_information": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "What you still need from the user, or what you could not verify.",
+            },
+        },
+        "required": ["status"],
+    },
+}
+
 
 @dataclass
 class Message:
@@ -111,6 +156,71 @@ class BaseAgent(ABC):
         except Exception:
             return False
         return bool(prefs.get("destination"))
+
+    def _emit_completion_status(self, agent_key: str) -> None:
+        """After a turn, have the specialist self-report a structured completion
+        signal into shared state ({status, confidence, missing_information}).
+
+        Why the agent reports it (vs. surrounding code inferring it): the signal
+        is real data the agent produces, so it can't drift from what the agent
+        actually did the way a hand-set boolean would. 'complete' is additionally
+        gated on the deterministic grounding flag (has_ever_searched) - a
+        specialist cannot self-declare done unless it actually retrieved verified
+        data, which reuses the same anti-fabrication guard as tool-enforcement.
+
+        Failure-safe: on ANY error (or if this agent isn't a tool-using
+        specialist) it falls back to a derived status - complete iff it has ever
+        grounded - so a flaky status call never breaks the turn or silently
+        blocks synthesis. Only meaningful for specialists that set
+        `has_ever_searched`/`state_manager`/`client`/`model`.
+        """
+        state_manager = getattr(self, "state_manager", None)
+        if state_manager is None:
+            return
+        grounded = bool(getattr(self, "has_ever_searched", False))
+        try:
+            messages = self._format_messages_for_llm()
+            messages.append({
+                "role": "user",
+                "content": (
+                    "INTERNAL STATUS CHECK (not shown to the traveler): call report_status "
+                    "describing your progress for THIS traveler, based only on the "
+                    "conversation above."
+                ),
+            })
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=300,
+                system="You report your own progress honestly for an internal orchestrator.",
+                messages=messages,
+                tools=[STATUS_REPORT_TOOL],
+                tool_choice={"type": "tool", "name": "report_status"},
+            )
+            status, confidence, missing = "gathering", None, []
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use" and block.name == "report_status":
+                    data = block.input or {}
+                    status = data.get("status", "gathering")
+                    confidence = data.get("confidence")
+                    missing = data.get("missing_information") or []
+                    break
+            # Deterministic guard: cannot be 'complete' without having grounded in
+            # real data, whatever the model self-reports.
+            if not grounded:
+                status = "gathering"
+            state_manager.update_agent_status(
+                agent_key, status=status, confidence=confidence,
+                missing_information=missing, grounded=grounded,
+            )
+        except Exception as e:
+            logger.debug(f"_emit_completion_status fallback for {agent_key}: {str(e)}")
+            state_manager.update_agent_status(
+                agent_key,
+                status="complete" if grounded else "gathering",
+                confidence=None,
+                missing_information=[],
+                grounded=grounded,
+            )
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} name='{self.name}' provider='{self.provider}'>"
