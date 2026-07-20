@@ -6,14 +6,42 @@ Uses AgentRegistry factory pattern for agent instantiation and Claude for conver
 """
 
 import os
-from typing import Optional, Dict, List
+import re
+from typing import Optional, Dict, List, Any
 import anthropic
 
 from agents.registry import AgentRegistry
-from agents.shared_state import get_state_manager
+from agents.shared_state import (
+    get_state_manager, reset_state_manager,
+    format_budget, is_real_itinerary,
+)
+from agents.yojana_agent import YojanaAgent
+from agents.parikshak_agent import ParikshakAgent
+from agents.feedback_handler import FeedbackHandler
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# --- Orchestration constants -------------------------------------------------
+# Cheap whole-word/phrase pre-filter for "the user wants the full itinerary built
+# now". A positive match is confirmed by an LLM context check before synthesis
+# actually runs, so bare "yes"/"ok" answering an unrelated sub-question doesn't
+# fire it.
+FINALIZE_TRIGGER_KEYWORDS = [
+    "yes", "ok", "okay", "approve", "approved", "confirm", "confirmed",
+    "perfect", "sounds good", "looks good", "go ahead", "lock it in",
+    "book it", "finalize", "finalise", "finalized", "finalised",
+    "generate itinerary", "create itinerary", "make the itinerary",
+]
+
+# agent_responses also stores a "sanchalak" entry every turn, so only these five
+# count as genuine specialist consultations for the synthesis gate.
+SPECIALIST_KEYS = {"atithi", "annapurna", "yatra", "safar", "bazaar"}
+
+MAX_REVISIONS = 3
+
+WELCOME_MESSAGE = "Welcome to TRAVAS-AI! Tell me about your dream trip."
 
 
 class SanchalakAgent:
@@ -107,11 +135,11 @@ separately and will appear right after.
         self.model = "claude-opus-4-8"
 
         # Initialize available conversational specialists from registry.
-        # Yojana (synthesizer) and Parikshak (validator) are excluded here -
-        # they're orchestration-only agents never reached via
-        # _identify_routing_intent's keyword routing, and are owned/driven
-        # separately by the app layer (e.g. streamlit_app.py) once enough
-        # specialist recommendations have been gathered.
+        # Yojana (synthesizer) and Parikshak (validator) are excluded from this
+        # routing set - they're never reached via _identify_routing_intent's
+        # keyword routing. They ARE owned by Sanchalak (built below) and driven
+        # by the workflow methods once enough specialist input exists; they're
+        # just not conversational specialists the user chats with directly.
         CONVERSATIONAL_SPECIALISTS = {"atithi", "annapurna", "yatra", "safar", "bazaar"}
         self.agents = {}
         for agent_name in AgentRegistry.list_agents():
@@ -129,6 +157,32 @@ separately and will appear right after.
 
         # Initialize shared state manager
         self.state_manager = get_state_manager()
+
+        # --- Full-lifecycle orchestration -----------------------------------
+        # Sanchalak is THE orchestrator: besides routing the conversational
+        # specialists above, it also drives the synthesis -> validation ->
+        # approval phase. Yojana (synthesizer) and Parikshak (validator) are
+        # deliberately NOT conversational specialists reached by routing - they
+        # are owned here and invoked by the workflow methods (generate_itinerary,
+        # approve, submit_revision, ...). This used to live in streamlit_app.py,
+        # which coupled the workflow to one UI; keeping it here means any
+        # frontend (Streamlit, FastAPI, WhatsApp, ...) drives the same logic.
+        self.yojana = YojanaAgent(api_key=self.api_key)
+        self.parikshak = ParikshakAgent(api_key=self.api_key)
+        self.feedback_handler = FeedbackHandler()
+
+        # Workflow/view state (formerly st.session_state)
+        self.messages: List[Dict[str, str]] = [
+            {"role": "system", "content": WELCOME_MESSAGE}
+        ]
+        self.itinerary: Optional[Dict[str, Any]] = None
+        self.itinerary_text: Optional[str] = None
+        self.itinerary_ready: bool = False
+        self.validation_result: Optional[str] = None
+        self.structured_validation_issues: List[str] = []
+        self.structured_validation_warnings: List[str] = []
+        self.approval_state: str = "PENDING"
+        self.revision_count: int = 0
 
     def _extract_and_update_preferences(self, message: str) -> None:
         """Extract travel info from user message using Claude and update shared state.
@@ -429,6 +483,295 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
         """
         return self.route_query(message)
 
+    # ==================================================================
+    # FULL-LIFECYCLE ORCHESTRATION
+    # (routing above is only one phase; these methods drive the rest:
+    #  synthesis -> contract validation -> quality check -> approval)
+    # ==================================================================
+
+    def send_message(self, user_input: str) -> Dict[str, Any]:
+        """Handle one user chat turn end to end: route via the specialist layer,
+        then auto-synthesize the itinerary if the user just confirmed they want
+        it built. Mutates state; returns a small result dict.
+        """
+        if not user_input or not user_input.strip():
+            return {"status": "noop"}
+
+        self.messages.append({"role": "user", "content": user_input})
+
+        try:
+            response = self.chat(user_input)
+            self.messages.append({"role": "assistant", "content": response})
+        except Exception as e:
+            logger.error(f"Chat error: {str(e)}")
+            return {"status": "error", "error": str(e)}
+
+        result = {"status": "ok", "synthesized": False}
+
+        # Only try synthesis if no real itinerary exists yet. Gated on
+        # itinerary_ready (not raw itinerary_text) so a prior refusal never
+        # permanently blocks a later real synthesis - the revise flow handles
+        # updates once a real itinerary exists.
+        if (not self.itinerary_ready
+                and self._message_triggers_synthesis(user_input)
+                and self._confirm_finalize_intent(user_input)):
+            if self.generate_itinerary():
+                result["synthesized"] = True
+                self.messages.append({
+                    "role": "system",
+                    "content": (
+                        f"🗺️ Itinerary created by Yojana!\n\n"
+                        f"{self.itinerary_text[:500]}... (see full itinerary on the right →)"
+                    ),
+                })
+            elif self.itinerary_text:
+                # Yojana explained why it can't build a draft yet - surface it.
+                self.messages.append({
+                    "role": "system",
+                    "content": f"⚠️ {self.itinerary_text[:500]}",
+                })
+            else:
+                logger.info("Synthesis triggered but not enough context yet; skipping.")
+
+        return result
+
+    def _message_triggers_synthesis(self, text: str) -> bool:
+        """Whole-word/phrase check for finalize-intent keywords in free text."""
+        text_lower = text.lower()
+        for kw in FINALIZE_TRIGGER_KEYWORDS:
+            if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+                return True
+        return False
+
+    def _confirm_finalize_intent(self, user_input: str) -> bool:
+        """Context-aware confirmation that this message really means 'generate
+        the complete itinerary now' - not just agreement to a narrower
+        sub-question ("shall I bring in Safar and Atithi?" -> "yes both").
+
+        Reuses Sanchalak's own conversation_history/client - only called after
+        the cheap keyword pre-filter matches, so it isn't an LLM call per turn.
+        """
+        try:
+            recent = self.conversation_history[-6:]
+            recent_text = "\n".join(
+                f"{t['role']}: {str(t['content'])[:300]}" for t in recent
+            )
+            prompt = f"""Recent conversation:
+{recent_text}
+
+Latest user message: "{user_input}"
+
+Does this message mean the user wants their COMPLETE trip itinerary generated/finalized right now - as opposed to just agreeing to a narrower sub-question (like consulting a specific specialist, answering a preference question, or confirming one detail)?
+
+Reply with exactly one word: YES or NO."""
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=5,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(
+                b.text for b in response.content if hasattr(b, "text")
+            ).strip().upper()
+            return text.startswith("YES")
+        except Exception as e:
+            logger.debug(f"finalize-intent classification error: {str(e)}")
+            return False
+
+    def can_generate_itinerary(self) -> bool:
+        """Gate: is there enough context to synthesize an itinerary?
+
+        Requires a destination and at least 2 GENUINE specialist responses.
+        Still a heuristic (a specialist that only asked a clarifying question
+        counts the same as one that returned real recommendations) - but this
+        method is the single place the gate lives, so a future upgrade to
+        structured per-specialist completion reporting has one clear home.
+        """
+        state = self.state_manager.get_state()
+        real_specialist_responses = SPECIALIST_KEYS & set(state["agent_responses"].keys())
+        return bool(state["travel_preferences"].get("destination")) and len(real_specialist_responses) >= 2
+
+    def generate_itinerary(self) -> bool:
+        """Run Yojana to draft (which also runs the forced structured
+        contract-validation pass), then run Parikshak. Returns True only if
+        Yojana produced a genuine draft (False when there isn't enough context
+        AND when Yojana correctly refused to fabricate - callers must not claim
+        success in either case).
+        """
+        if not self.can_generate_itinerary():
+            return False
+
+        state = self.state_manager.get_state()
+        specialist_outputs = {
+            "atithi": str(state["agent_responses"].get("atithi", "No hotel recommendations yet")),
+            "annapurna": str(state["agent_responses"].get("annapurna", "No food recommendations yet")),
+            "yatra": str(state["agent_responses"].get("yatra", "No attraction recommendations yet")),
+            "safar": str(state["agent_responses"].get("safar", "No transport recommendations yet")),
+            "bazaar": str(state["agent_responses"].get("bazaar", "No shopping recommendations yet")),
+        }
+
+        itinerary_text = self.yojana.create_itinerary(specialist_outputs)
+        self.itinerary_text = itinerary_text
+        is_real = is_real_itinerary(itinerary_text)
+        self.itinerary_ready = is_real
+
+        self.structured_validation_issues = list(self.yojana.structured_validation_issues)
+        self.structured_validation_warnings = list(self.yojana.structured_validation_warnings)
+
+        prefs = state["travel_preferences"]
+        self.itinerary = {
+            "destination": prefs.get("destination", "TBD"),
+            "duration": f"{prefs.get('num_days', 'N/A')} days",
+            "travelers": f"{prefs.get('num_adults', 0)} adults, {prefs.get('num_children', 0)} children",
+            "budget": format_budget(prefs.get("budget")),
+            "summary": itinerary_text,
+        }
+
+        if is_real:
+            deterministic_findings = {
+                "issues": self.structured_validation_issues,
+                "warnings": self.structured_validation_warnings,
+            }
+            self.validation_result = self._run_validation(itinerary_text, prefs, deterministic_findings)
+            self.approval_state = "CONDITIONAL"
+        else:
+            self.validation_result = None
+            self.approval_state = "PENDING"
+
+        return is_real
+
+    def _run_validation(
+        self, itinerary_text: str, prefs: dict, deterministic_findings: Optional[dict] = None
+    ) -> str:
+        """Run Parikshak's quality check, passing through the deterministic
+        contract-validation findings so it treats real overlap/budget checks as
+        confirmed facts rather than re-deriving them from prose."""
+        try:
+            return self.parikshak.validate_itinerary(
+                itinerary_text, dict(prefs), deterministic_findings=deterministic_findings
+            )
+        except Exception as e:
+            logger.error(f"Parikshak validation error: {str(e)}")
+            return ("⚠️ Validation could not be completed automatically. Please review the "
+                    "itinerary manually before approving.")
+
+    def approve(self) -> Dict[str, Any]:
+        """Approve the current itinerary, generating one first if none has
+        genuinely been built yet (so we never declare 'approved' for nothing)."""
+        if not self.itinerary_ready:
+            if not self.generate_itinerary():
+                self.messages.append({
+                    "role": "system",
+                    "content": ("⚠️ I don't have enough trip details yet to build an itinerary "
+                                "(need at least a destination and two specialists' recommendations). "
+                                "Please share more details in chat first, then approve."),
+                })
+                return {"status": "insufficient_context"}
+
+        self.feedback_handler.process_user_feedback("I approve this itinerary.", self.itinerary)
+        self.approval_state = "APPROVED"
+        self.messages.append({
+            "role": "system",
+            "content": "✅ Itinerary approved and finalized! Ready for booking.",
+        })
+        return {"status": "approved"}
+
+    def reject(self) -> Dict[str, Any]:
+        """Reject the current itinerary and move to the post-reject fork."""
+        _, details = self.feedback_handler.process_user_feedback(
+            "I reject this itinerary.", self.itinerary
+        )
+        self.approval_state = "REJECTED"
+        message = (
+            details.get(
+                "message",
+                "Would you like to:\n1. Start fresh with new preferences?\n2. Make specific changes?",
+            )
+            if isinstance(details, dict)
+            else "Would you like to:\n1. Start fresh with new preferences?\n2. Make specific changes?"
+        )
+        self.messages.append({"role": "system", "content": message})
+        return {"status": "rejected"}
+
+    def can_revise(self) -> bool:
+        """Whether more revisions are allowed."""
+        return self.revision_count < MAX_REVISIONS
+
+    def resume_after_reject_make_changes(self) -> None:
+        """Caller chose 'make changes' after a reject: restore a sensible
+        approval_state so the itinerary panel doesn't stay stuck on REJECTED."""
+        self.approval_state = "CONDITIONAL" if self.itinerary_ready else "PENDING"
+
+    def submit_revision(self, feedback: str) -> Dict[str, Any]:
+        """Apply a revision: generate a base itinerary first if none exists,
+        then run Yojana.revise -> contract validation -> Parikshak, refreshing
+        state. Returns a status the caller can branch on."""
+        if not feedback or not feedback.strip():
+            return {"status": "empty_feedback"}
+
+        if not self.can_revise():
+            return {"status": "max_revisions"}
+
+        if not self.itinerary_ready:
+            if not self.generate_itinerary():
+                self.messages.append({
+                    "role": "system",
+                    "content": ("⚠️ I don't have an itinerary to revise yet (need at least a "
+                                "destination and two specialists' recommendations). Please share "
+                                "more details in chat first."),
+                })
+                return {"status": "insufficient_context"}
+
+        self.feedback_handler.process_user_feedback(feedback, self.itinerary)
+        self.revision_count += 1
+        self.messages.append({
+            "role": "user",
+            "content": f"Revision {self.revision_count}: {feedback}",
+        })
+
+        try:
+            revised_text = self.yojana.revise_itinerary(feedback)
+            self.itinerary_text = revised_text
+            if self.itinerary:
+                self.itinerary["summary"] = revised_text
+            self.structured_validation_issues = list(self.yojana.structured_validation_issues)
+            self.structured_validation_warnings = list(self.yojana.structured_validation_warnings)
+        except Exception as e:
+            logger.error(f"Revision error: {str(e)}")
+            self.messages.append({"role": "system", "content": f"❌ Revision failed: {str(e)}"})
+            return {"status": "error", "error": str(e)}
+
+        prefs = self.state_manager.get_preferences()
+        deterministic_findings = {
+            "issues": self.structured_validation_issues,
+            "warnings": self.structured_validation_warnings,
+        }
+        self.validation_result = self._run_validation(self.itinerary_text, prefs, deterministic_findings)
+        self.approval_state = "CONDITIONAL"
+        self.messages.append({
+            "role": "system",
+            "content": (f"✅ Revision {self.revision_count}/{MAX_REVISIONS} complete — "
+                        f"updated itinerary and quality check are ready on the right →"),
+        })
+        return {"status": "revised", "revision_count": self.revision_count}
+
+    def get_view_state(self) -> Dict[str, Any]:
+        """Everything a frontend needs to render the current trip, in one call -
+        keeps the UI from reaching into internals field by field."""
+        return {
+            "messages": self.messages,
+            "itinerary": self.itinerary,
+            "itinerary_text": self.itinerary_text,
+            "itinerary_ready": self.itinerary_ready,
+            "validation_result": self.validation_result,
+            "structured_validation_issues": self.structured_validation_issues,
+            "structured_validation_warnings": self.structured_validation_warnings,
+            "approval_state": self.approval_state,
+            "revision_count": self.revision_count,
+            "max_revisions": MAX_REVISIONS,
+            "can_revise": self.can_revise(),
+            "can_act": len(self.messages) > 1,
+        }
+
     def get_orchestrator_info(self) -> Dict:
         """Get orchestrator status"""
         return {
@@ -476,13 +819,38 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
         return self.state_manager.get_state()["agent_responses"]
 
     def reset(self) -> None:
-        """Reset all agents and history"""
+        """Reset the whole trip: specialists, synthesizer/validator, feedback
+        handler, shared state, and all workflow/view state. This is the single
+        'New Trip' entry point for any frontend."""
+        # Clear shared state IN PLACE (same StateManager object) so every agent
+        # still holding a reference to it - the specialists, Yojana, Parikshak -
+        # sees the cleared state. Creating a NEW manager here would desync them
+        # from Sanchalak, since reset() reuses the existing agents rather than
+        # rebuilding them.
+        reset_state_manager()
+
         for agent in self.agents.values():
             agent.reset()
+        self.yojana.reset()
+        self.parikshak.reset()
+        self.feedback_handler.reset()
+
         self.last_agent_used = None
         self.conversation_history = []
         self.state_manager.state["orchestrator_active"] = False
-        logger.info("Sanchalak orchestrator reset")
+
+        # Workflow/view state
+        self.messages = [{"role": "system", "content": WELCOME_MESSAGE}]
+        self.itinerary = None
+        self.itinerary_text = None
+        self.itinerary_ready = False
+        self.validation_result = None
+        self.structured_validation_issues = []
+        self.structured_validation_warnings = []
+        self.approval_state = "PENDING"
+        self.revision_count = 0
+
+        logger.info("Sanchalak orchestrator reset (full trip)")
 
     def __repr__(self) -> str:
         return f"<SanchalakAgent model='{self.model}' specialists={len(self.agents)} last_used={self.last_agent_used}>"
