@@ -183,6 +183,37 @@ _DOMAIN_CONFIG = {
 }
 
 
+def get_covered_cities(domain: str) -> set:
+    """Cities this domain actually has verified data for, derived directly from
+    the mock datasets.
+
+    Deliberately does NOT touch chromadb (only the plain record loaders), so it
+    works even where the vector layer is unavailable. Used for a deterministic
+    coverage pre-check: every specialist can flag an out-of-dataset destination
+    the same way and UP FRONT, instead of one specialist gathering preferences
+    or citing general-knowledge specifics before discovering the gap only after
+    a search returns zero.
+
+    For city-keyed domains (hotels/restaurants/attractions/shops) this is the
+    set of record cities. For transport it's the set of departure+arrival cities
+    seen across journeys (route-level nuance still handled by the search itself).
+    Returns an empty set on any error (callers then simply skip the pre-check).
+    """
+    config = _DOMAIN_CONFIG.get(domain)
+    if not config:
+        return set()
+    cities = set()
+    try:
+        for rec in config["loader"]():
+            for val in config["meta_fn"](rec).values():
+                if val:
+                    cities.add(str(val).strip().title())
+    except Exception as e:
+        logger.debug(f"get_covered_cities({domain}) failed: {str(e)}")
+        return set()
+    return cities
+
+
 def ensure_indexed(domain: str) -> bool:
     """Build the vector index for a domain the first time it's needed.
 
