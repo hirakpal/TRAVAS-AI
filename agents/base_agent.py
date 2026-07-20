@@ -78,4 +78,4 @@ class BaseAgent(ABC):
         return messages
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__} name='{self.name}' provider='{self.provider}'>
+        return f"<{self.__class__.__name__} name='{self.name}' provider='{self.provider}'>"
