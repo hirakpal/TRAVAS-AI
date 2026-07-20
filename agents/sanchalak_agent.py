@@ -39,6 +39,32 @@ MAX_REVISIONS = 3
 
 WELCOME_MESSAGE = "Welcome to TRAVAS-AI! Tell me about your dream trip."
 
+# Deterministic backup for routing when the LLM intent classifier misses a bare
+# affirmative reply to a specialist offer (e.g. "yes" answering "Shall I bring in
+# Safar and Atithi?"). See _affirmative_reoffer_fallback.
+_AFFIRMATIVE_REPLIES = {
+    "yes", "y", "yeah", "yep", "yup", "ya", "sure", "ok", "okay", "okey",
+    "please", "pls", "please do", "yes please", "go ahead", "go for it",
+    "do it", "sounds good", "sounds great", "lets do it", "let's do it",
+    "both", "yes both", "all", "all four", "proceed", "perfect", "great",
+    "yes lets", "yes let's", "absolutely", "definitely",
+}
+# The prior assistant turn must actually be OFFERING to consult specialists for
+# an affirmative to count as routing (so "yes" to a budget question doesn't route).
+_OFFER_MARKERS = [
+    "shall i", "bring in", "want me to", "should i", "check with", "consult",
+    "start with", "let me bring", "loop in", "pull in", "bring my",
+]
+# Domain words that map an offered specialist name back to its agent key, so we
+# can tell WHICH specialists the prior assistant turn named.
+_SPECIALIST_DOMAIN_HINTS = {
+    "atithi": ["atithi", "hotel", "hotels", "stay", "stays", "accommodation"],
+    "annapurna": ["annapurna", "food", "restaurant", "restaurants", "dining", "cuisine"],
+    "yatra": ["yatra", "tour", "tours", "attraction", "attractions", "sightseeing", "activities"],
+    "safar": ["safar", "transport", "flight", "flights", "train", "trains", "getting around"],
+    "bazaar": ["bazaar", "shopping", "shop", "shops", "market", "markets"],
+}
+
 
 class SanchalakAgent:
     """Master orchestrator that chats naturally and coordinates specialist agents"""
@@ -362,6 +388,53 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
             logger.debug(f"Error identifying routing intents: {str(e)}")
             return []
 
+    def _affirmative_reoffer_fallback(self, message: str) -> List[str]:
+        """Deterministic recovery when _identify_routing_intents returns [] but
+        the user clearly said 'yes' to a specialist offer.
+
+        The LLM routing classifier occasionally misses a bare affirmative ("yes")
+        replying to "Shall I bring in Safar and Atithi?". When it does, the turn
+        dead-ends: Sanchalak's chat branch says "consulting them now..." but no
+        specialist is ever actually called, so their recommendations never
+        appear and the user is stuck. This recovers WITHOUT an LLM: if the latest
+        message is a short affirmative AND the immediately preceding assistant
+        turn was offering to consult specialists, route to exactly the ones that
+        turn named (by name or domain word). Deterministic, so it can't miss the
+        same way the classifier did.
+        """
+        available = [a for a in SPECIALIST_AGENT_NAMES if a in self.agents]
+        if not available:
+            return []
+
+        # Is the latest message a short, content-free affirmative?
+        norm = re.sub(r"[^a-z\s']", "", message.strip().lower()).strip()
+        if not norm:
+            return []
+        words = norm.split()
+        if len(words) > 5:
+            return []
+        if norm not in _AFFIRMATIVE_REPLIES and not any(w in _AFFIRMATIVE_REPLIES for w in words):
+            return []
+
+        # Find the most recent assistant turn and confirm it was an OFFER.
+        prev = None
+        for turn in reversed(self.conversation_history):
+            if turn.get("role") == "assistant":
+                prev = str(turn.get("content", "")).lower()
+                break
+        if not prev or not any(marker in prev for marker in _OFFER_MARKERS):
+            return []
+
+        # Which specialists did that offer name?
+        offered = []
+        for name in available:
+            hints = _SPECIALIST_DOMAIN_HINTS.get(name, [name])
+            if any(re.search(r"\b" + re.escape(h) + r"\b", prev) for h in hints):
+                offered.append(name)
+        if offered:
+            logger.info(f"Affirmative-reoffer fallback routing to: {offered}")
+        return offered
+
     def _route_to_specialist(self, agent_name: str, message: str) -> str:
         """Route message to specialist agent.
 
@@ -421,6 +494,12 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
             # Check if we should route to one or more specialists (context-aware,
             # not just keyword matching - see _identify_routing_intents docstring)
             routing_intents = self._identify_routing_intents(message)
+
+            # Deterministic safety net: if the classifier missed a plain "yes"
+            # replying to a specialist offer, recover it here so the turn never
+            # dead-ends promising specialists that are never actually called.
+            if not routing_intents:
+                routing_intents = self._affirmative_reoffer_fallback(message)
 
             if routing_intents:
                 # Route to each identified specialist for real, and concatenate
