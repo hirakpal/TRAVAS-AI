@@ -116,91 +116,79 @@ For general questions, chat naturally without routing."""
         self.state_manager = get_state_manager()
 
     def _extract_and_update_preferences(self, message: str) -> None:
-        """Extract travel info from user message and update shared state.
+        """Extract travel info from user message using Claude and update shared state.
+
+        Uses an LLM call instead of hardcoded regex/keyword matching so it
+        generalizes to ANY destination, city, phrasing, or traveler description
+        (not just Goa / specific hardcoded cities).
 
         Args:
             message: User message
         """
         try:
+            import json
             import re
             from datetime import datetime, timedelta
 
-            # Try to extract common patterns from the message
-            message_lower = message.lower()
-            updates = {}
+            current_prefs = self.state_manager.get_preferences()
+            known = {k: v for k, v in current_prefs.items() if v is not None}
 
-            # Extract destination and source cities
-            # Destination cities
-            if "goa" in message_lower:
-                updates["destination"] = "Goa"
-            if "north goa" in message_lower:
-                updates["accommodation_area"] = "North Goa"
-            if "south goa" in message_lower:
-                updates["accommodation_area"] = "South Goa"
+            extraction_prompt = f"""Extract travel planning details from the user's message below. Return ONLY a valid JSON object, no other text, no markdown code fences.
 
-            # Source/departure cities (look for cities mentioned at start or after keywords)
-            source_cities = ["bangalore", "bengaluru", "delhi", "mumbai", "pune", "kolkata", "hyderabad", "chennai", "kochi", "ahmedabad"]
-            for city in source_cities:
-                if city in message_lower:
-                    # Check if it's likely a departure city (mentioned near keywords like "from", "departing", or standalone)
-                    if f"from {city}" in message_lower or f"{city}," in message_lower or message_lower.startswith(city):
-                        updates["source_city"] = city.capitalize()
-                        break
+Already known info (do not repeat unless it changed): {json.dumps(known)}
 
-            # Extract budget (look for ₹ or INR patterns, pick largest number)
-            budget_matches = re.findall(r'₹?([\d,]+)\s*(?:inr|rupees?)?', message, re.IGNORECASE)
-            if budget_matches:
-                # Take the largest number (usually the main budget)
-                budget_values = [int(b.replace(',', '')) for b in budget_matches if int(b.replace(',', '')) > 100]
-                if budget_values:
-                    updates["budget"] = float(max(budget_values))
+User message: "{message}"
 
-            # Extract number of days (look for "5 days", "5-day", etc.)
-            days_match = re.search(r'(\d+)\s*(?:days?|day\s+trip)', message_lower)
-            if days_match:
-                num_days = int(days_match.group(1))
-                updates["num_days"] = num_days
+Return a JSON object with ONLY the NEW or UPDATED fields found in this message (omit fields not mentioned here):
+{{
+  "destination": "city/place name if mentioned (e.g. Delhi, Goa, Jaipur)",
+  "source_city": "departure/origin city if mentioned",
+  "accommodation_area": "specific neighborhood/area for stay if mentioned (e.g. North Goa, Candolim)",
+  "checkin_date": "date in 'DD Mon' format if mentioned, e.g. '25 Jul'",
+  "num_days": integer trip duration in days if mentioned,
+  "num_adults": integer count of adult travelers if determinable from context,
+  "num_children": integer count of children if mentioned,
+  "budget": numeric budget value if a rupee amount is mentioned,
+  "preferred_activities": ["list", "of", "interests"] if mentioned
+}}
 
-                # If we have check-in date, calculate check-out date
-                current_prefs = self.state_manager.get_preferences()
-                if current_prefs.get("checkin_date"):
-                    try:
-                        # Parse check-in date (e.g., "25 Jul")
-                        checkin_str = current_prefs["checkin_date"]
-                        # Assume current year
-                        checkin_date = datetime.strptime(f"{checkin_str} 2026", "%d %b %Y")
-                        checkout_date = checkin_date + timedelta(days=num_days)
-                        updates["checkout_date"] = checkout_date.strftime("%d %b").lstrip("0")
-                    except:
-                        pass
+Rules:
+- Only include a field if the message provides new/updated information for it.
+- For traveler counts: "couple" = 2 adults; "family of 4" = 4 adults (use judgment); "me, wife, elderly parents" = 4 adults; explicit numbers like "4 people" = 4 adults unless children are specified separately.
+- If nothing is extractable, return {{}}.
+- Output must be valid JSON only."""
 
-            # Extract dates (look for "25th", "July", patterns)
-            if any(month in message_lower for month in ["july", "jul", "august", "aug", "september", "sep"]):
-                # Simple pattern: extract first date-like mention
-                date_match = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s*([a-z]+)', message_lower)
-                if date_match:
-                    day_str = date_match.group(1)
-                    month_str = date_match.group(2)
-                    # Store in consistent format
-                    updates["checkin_date"] = f"{day_str} {month_str.capitalize()}"
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=300,
+                messages=[{"role": "user", "content": extraction_prompt}]
+            )
 
-                    # If num_days is already known, calculate checkout
-                    if "num_days" in updates:
-                        try:
-                            checkin_date = datetime.strptime(f"{day_str} {month_str.capitalize()} 2026", "%d %b %Y")
-                            checkout_date = checkin_date + timedelta(days=updates["num_days"])
-                            updates["checkout_date"] = checkout_date.strftime("%d %b").lstrip("0")
-                        except:
-                            pass
+            text = "".join(
+                block.text for block in response.content if hasattr(block, "text")
+            ).strip()
 
-            # Extract travelers (look for "couple", "2 people", etc.)
-            if "couple" in message_lower:
-                updates["num_adults"] = 2
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            if not json_match:
+                return
 
-            # Update shared state with all extracted info at once
-            if updates:
-                self.state_manager.update_preferences(updates)
-                logger.info(f"Updated preferences: {updates}")
+            extracted = json.loads(json_match.group(0))
+            if not extracted:
+                return
+
+            # Calculate checkout_date if we now know checkin_date + num_days
+            checkin_str = extracted.get("checkin_date") or current_prefs.get("checkin_date")
+            num_days = extracted.get("num_days") or current_prefs.get("num_days")
+            if checkin_str and num_days:
+                try:
+                    checkin_date = datetime.strptime(f"{checkin_str} 2026", "%d %b %Y")
+                    checkout_date = checkin_date + timedelta(days=int(num_days))
+                    extracted["checkout_date"] = checkout_date.strftime("%d %b").lstrip("0")
+                except Exception:
+                    pass
+
+            self.state_manager.update_preferences(extracted)
+            logger.info(f"Updated preferences via LLM extraction: {extracted}")
         except Exception as e:
             logger.debug(f"Error extracting preferences: {str(e)}")
             pass
