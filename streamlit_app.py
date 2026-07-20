@@ -119,6 +119,27 @@ with st.sidebar:
     with scol2:
         st.metric("Revisions Used", f"{view['revision_count']}/{view['max_revisions']}")
 
+    # Specialist progress "traffic light" - derived from each specialist's own
+    # reported completion status (green = delivered grounded recs, amber = still
+    # gathering, grey = not consulted yet). This is what the synthesis gate reads.
+    spec_status = view.get("specialist_status") or {}
+    if spec_status:
+        st.caption("Specialist progress")
+        _labels = {
+            "atithi": "🏨 Hotels", "annapurna": "🍽️ Food", "yatra": "🗺️ Tours",
+            "safar": "✈️ Transport", "bazaar": "🛍️ Shopping",
+        }
+        for _key, _label in _labels.items():
+            _s = spec_status.get(_key)
+            if not _s:
+                st.markdown(f"⚪ {_label} — _not consulted_")
+            elif _s.get("status") == "complete":
+                _conf = _s.get("confidence")
+                _conf_txt = f" ({_conf:.0%})" if isinstance(_conf, (int, float)) else ""
+                st.markdown(f"🟢 {_label} — complete{_conf_txt}")
+            else:
+                st.markdown(f"🟡 {_label} — gathering")
+
     st.divider()
     st.subheader("✅ Actions")
 
