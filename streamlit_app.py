@@ -384,11 +384,19 @@ with st.sidebar:
                 "I approve this itinerary.",
                 st.session_state.itinerary
             )
-            # Extract approval status safely
-            if isinstance(details, dict):
-                st.session_state.approval_state = details.get('approval_status', details.get('approval_state', 'APPROVED'))
-            else:
-                st.session_state.approval_state = 'APPROVED'
+            # feedback_handler._handle_approval() returns a top-level
+            # "approval_state" key that is itself a dict (ItineraryApprovalState
+            # .to_dict(), e.g. {"approval_status": "APPROVED", ...}) - there is
+            # no top-level "approval_status" key. The old code below fell
+            # through .get('approval_status', ...) -> .get('approval_state',
+            # 'APPROVED') and stored *that whole dict* into
+            # st.session_state.approval_state on every single Approve click.
+            # That's the actual root cause of the original
+            # "TypeError: dict is not an accepted type" crash - the earlier
+            # isinstance() guards on the display side only hid the symptom.
+            # process_user_feedback("I approve...") always classifies as
+            # APPROVE and always succeeds, so this is simply "APPROVED".
+            st.session_state.approval_state = 'APPROVED'
             st.session_state.messages.append({
                 "role": "system",
                 "content": "✅ Itinerary approved and finalized! Ready for booking."
@@ -459,47 +467,75 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Submit Revision", use_container_width=True):
-                action, details = st.session_state.feedback_handler.process_user_feedback(
-                    revision_feedback,
-                    st.session_state.itinerary
-                )
-                st.session_state.revision_count += 1
-                st.session_state.show_revise_input = False
-                st.session_state.messages.append({
-                    "role": "user",
-                    "content": f"Revision {st.session_state.revision_count}: {revision_feedback}"
-                })
+                if not revision_feedback or not revision_feedback.strip():
+                    # Don't use st.stop() here - it would halt the whole script
+                    # mid-render and blank out the chat/itinerary panel below,
+                    # which are defined later in the script. Just skip the
+                    # submit logic and let the page finish rendering normally.
+                    st.warning("Please describe what you'd like changed before submitting.")
+                else:
+                    # Revise was previously callable even when no itinerary had
+                    # ever been generated yet (nothing gated it on itinerary_ready,
+                    # unlike Approve) - that would ask Yojana to "revise" a draft
+                    # that never existed. Generate one first if needed, same
+                    # pattern as the Approve button.
+                    ready = True
+                    if not st.session_state.get('itinerary_ready'):
+                        with st.spinner("🗺️ Generating an itinerary to revise..."):
+                            generated = generate_itinerary()
+                        if not generated:
+                            ready = False
+                            st.session_state.show_revise_input = False
+                            st.session_state.messages.append({
+                                "role": "system",
+                                "content": "⚠️ I don't have an itinerary to revise yet "
+                                            "(need at least a destination and two specialists' "
+                                            "recommendations). Please share more details in chat first."
+                            })
+                            st.rerun()
 
-                # Actually call Yojana to revise and Parikshak to re-validate -
-                # this previously just printed a canned success message
-                # without doing either, leaving the itinerary unchanged.
-                with st.spinner(f"🔄 Yojana is revising (attempt {st.session_state.revision_count}/3)..."):
-                    try:
-                        revised_text = st.session_state.yojana.revise_itinerary(revision_feedback)
-                        st.session_state.itinerary_text = revised_text
-                        if st.session_state.itinerary:
-                            st.session_state.itinerary["summary"] = revised_text
-                    except Exception as e:
-                        logger.error(f"Revision error: {str(e)}")
+                    if ready:
+                        action, details = st.session_state.feedback_handler.process_user_feedback(
+                            revision_feedback,
+                            st.session_state.itinerary
+                        )
+                        st.session_state.revision_count += 1
+                        st.session_state.show_revise_input = False
+                        st.session_state.messages.append({
+                            "role": "user",
+                            "content": f"Revision {st.session_state.revision_count}: {revision_feedback}"
+                        })
+
+                        # Actually call Yojana to revise and Parikshak to re-validate -
+                        # this previously just printed a canned success message
+                        # without doing either, leaving the itinerary unchanged.
+                        with st.spinner(f"🔄 Yojana is revising (attempt {st.session_state.revision_count}/3)..."):
+                            try:
+                                revised_text = st.session_state.yojana.revise_itinerary(revision_feedback)
+                                st.session_state.itinerary_text = revised_text
+                                if st.session_state.itinerary:
+                                    st.session_state.itinerary["summary"] = revised_text
+                            except Exception as e:
+                                logger.error(f"Revision error: {str(e)}")
+                                st.session_state.messages.append({
+                                    "role": "system",
+                                    "content": f"❌ Revision failed: {str(e)}"
+                                })
+                                st.rerun()
+
+                        with st.spinner("🔍 Parikshak is re-validating..."):
+                            prefs = get_state_manager().get_preferences()
+                            st.session_state.validation_result = _run_validation(
+                                st.session_state.itinerary_text, prefs
+                            )
+
+                        st.session_state.approval_state = 'CONDITIONAL'
                         st.session_state.messages.append({
                             "role": "system",
-                            "content": f"❌ Revision failed: {str(e)}"
+                            "content": f"✅ Revision {st.session_state.revision_count}/3 complete — "
+                                        f"updated itinerary and quality check are ready on the right →"
                         })
                         st.rerun()
-
-                with st.spinner("🔍 Parikshak is re-validating..."):
-                    prefs = get_state_manager().get_preferences()
-                    st.session_state.validation_result = _run_validation(
-                        st.session_state.itinerary_text, prefs
-                    )
-
-                st.session_state.approval_state = 'CONDITIONAL'
-                st.session_state.messages.append({
-                    "role": "system",
-                    "content": f"✅ Revision {st.session_state.revision_count}/3 complete — "
-                                f"updated itinerary and quality check are ready on the right →"
-                })
-                st.rerun()
 
         with col2:
             if st.button("Cancel", use_container_width=True):
