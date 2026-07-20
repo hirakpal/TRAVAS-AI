@@ -7,6 +7,7 @@ from agents.yatra_agent import YatraAgent
 from agents.safar_agent import SafarAgent
 from agents.bazaar_agent import BazaarAgent
 from agents.yojana_agent import YojanaAgent
+from agents.parikshak_agent import ParikshakAgent
 
 
 class AgentRegistry:
@@ -19,6 +20,7 @@ class AgentRegistry:
         "safar": SafarAgent,
         "bazaar": BazaarAgent,
         "yojana": YojanaAgent,
+        "parikshak": ParikshakAgent,
     }
 
     @classmethod
