@@ -115,6 +115,58 @@ For general questions, chat naturally without routing."""
         # Initialize shared state manager
         self.state_manager = get_state_manager()
 
+    def _extract_and_update_preferences(self, message: str) -> None:
+        """Extract travel info from user message and update shared state.
+
+        Args:
+            message: User message
+        """
+        try:
+            import re
+            # Try to extract common patterns from the message
+            message_lower = message.lower()
+            updates = {}
+
+            # Extract destination (look for city names)
+            if "goa" in message_lower:
+                updates["destination"] = "Goa"
+            if "north goa" in message_lower:
+                updates["accommodation_area"] = "North Goa"
+            if "south goa" in message_lower:
+                updates["accommodation_area"] = "South Goa"
+
+            # Extract budget (look for ₹ or INR patterns)
+            budget_match = re.search(r'₹?([\d,]+)', message)
+            if budget_match:
+                budget_str = budget_match.group(1).replace(',', '')
+                try:
+                    budget = float(budget_str)
+                    updates["budget"] = budget
+                except ValueError:
+                    pass
+
+            # Extract dates (look for "25th", "July", patterns)
+            if any(month in message_lower for month in ["july", "jul", "august", "aug", "september", "sep"]):
+                # Simple pattern: extract first date-like mention
+                date_match = re.search(r'(\d{1,2}(?:st|nd|rd|th)?)\s*([a-z]+)', message_lower)
+                if date_match:
+                    day_str = re.sub(r'[a-z]+', '', date_match.group(1))
+                    month_str = date_match.group(2)
+                    # Store as-is for now (can improve formatting later)
+                    updates["checkin_date"] = f"{day_str} {month_str.capitalize()}"
+
+            # Extract travelers (look for "couple", "2 people", etc.)
+            if "couple" in message_lower:
+                updates["num_adults"] = 2
+
+            # Update shared state with all extracted info at once
+            if updates:
+                self.state_manager.update_preferences(updates)
+                logger.info(f"Updated preferences: {updates}")
+        except Exception as e:
+            logger.debug(f"Error extracting preferences: {str(e)}")
+            pass
+
     def _identify_routing_intent(self, message: str) -> Optional[str]:
         """Identify if message should be routed to a specialist.
 
@@ -214,6 +266,9 @@ USER REQUEST:
             self.state_manager.add_message("user", message, agent="sanchalak")
             self.state_manager.set_active_agent("sanchalak")
             self.state_manager.state["orchestrator_active"] = True
+
+            # Extract and update travel preferences from this message
+            self._extract_and_update_preferences(message)
 
             # Add to local history
             self.conversation_history.append({"role": "user", "content": message})
