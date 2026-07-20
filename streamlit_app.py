@@ -5,6 +5,7 @@ Complete travel assistant with multi-agent orchestration
 
 import streamlit as st
 import os
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -15,11 +16,88 @@ load_dotenv()
 from agents.sanchalak_agent import SanchalakAgent
 from agents.yojana_agent import YojanaAgent
 from agents.parikshak_agent import ParikshakAgent
-from agents.shared_state import initialize_state_manager, get_state_manager, reset_state_manager
+from agents.shared_state import initialize_state_manager, get_state_manager, reset_state_manager, format_budget
 from agents.feedback_handler import FeedbackHandler
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ============================================================================
+# ITINERARY SYNTHESIS HELPERS
+# ============================================================================
+
+# Phrases that should trigger Yojana synthesis from free-text chat. Matched as
+# whole words/phrases (not substrings) so e.g. "finalise" (British spelling)
+# is caught but arbitrary text isn't accidentally matched.
+FINALIZE_TRIGGER_KEYWORDS = [
+    "yes", "ok", "okay", "approve", "approved", "confirm", "confirmed",
+    "perfect", "sounds good", "looks good", "go ahead", "lock it in",
+    "book it", "finalize", "finalise", "finalized", "finalised",
+    "generate itinerary", "create itinerary", "make the itinerary",
+]
+
+
+def _message_triggers_synthesis(text: str) -> bool:
+    """Whole-word/phrase check for finalize-intent keywords in free text."""
+    text_lower = text.lower()
+    for kw in FINALIZE_TRIGGER_KEYWORDS:
+        if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+            return True
+    return False
+
+
+def _can_generate_itinerary() -> bool:
+    """Check whether shared state has enough context to synthesize."""
+    state = get_state_manager().get_state()
+    return bool(state["travel_preferences"].get("destination")) and len(state["agent_responses"]) > 0
+
+
+def _run_validation(itinerary_text: str, prefs: dict) -> str:
+    """Run Parikshak's quality checks on a draft itinerary.
+
+    Parikshak is the quality gate between Yojana's draft and the user (per
+    its own system prompt) - it was previously instantiated but never
+    actually invoked anywhere in the app.
+    """
+    try:
+        return st.session_state.parikshak.validate_itinerary(itinerary_text, dict(prefs))
+    except Exception as e:
+        logger.error(f"Parikshak validation error: {str(e)}")
+        return "⚠️ Validation could not be completed automatically. Please review the itinerary manually before approving."
+
+
+def generate_itinerary() -> bool:
+    """Generate the itinerary via Yojana, then validate it via Parikshak,
+    storing both results in session state. Returns True on success, False
+    if there isn't enough context yet (caller should not claim success).
+    """
+    if not _can_generate_itinerary():
+        return False
+
+    state = get_state_manager().get_state()
+    specialist_outputs = {
+        "atithi": str(state["agent_responses"].get("atithi", "No hotel recommendations yet")),
+        "annapurna": str(state["agent_responses"].get("annapurna", "No food recommendations yet")),
+        "yatra": str(state["agent_responses"].get("yatra", "No attraction recommendations yet")),
+        "safar": str(state["agent_responses"].get("safar", "No transport recommendations yet")),
+        "bazaar": str(state["agent_responses"].get("bazaar", "No shopping recommendations yet")),
+    }
+
+    itinerary_text = st.session_state.yojana.create_itinerary(specialist_outputs)
+    st.session_state.itinerary_text = itinerary_text
+
+    prefs = state["travel_preferences"]
+    st.session_state.itinerary = {
+        "destination": prefs.get("destination", "TBD"),
+        "duration": f"{prefs.get('num_days', 'N/A')} days",
+        "travelers": f"{prefs.get('num_adults', 0)} adults, {prefs.get('num_children', 0)} children",
+        "budget": format_budget(prefs.get("budget")),
+        "summary": itinerary_text
+    }
+
+    st.session_state.validation_result = _run_validation(itinerary_text, prefs)
+    st.session_state.approval_state = 'CONDITIONAL'
+    return True
 
 # ============================================================================
 # PAGE CONFIG
@@ -91,6 +169,7 @@ if 'initialized' not in st.session_state:
     st.session_state.messages = []
     st.session_state.itinerary = None
     st.session_state.itinerary_text = None
+    st.session_state.validation_result = None
     st.session_state.approval_state = 'PENDING'
     st.session_state.revision_count = 0
 
@@ -134,10 +213,16 @@ with col2:
     if st.button("🔄 New Trip", key="new_trip_btn"):
         st.session_state.messages = []
         st.session_state.itinerary = None
+        st.session_state.itinerary_text = None
+        st.session_state.validation_result = None
         st.session_state.approval_state = 'PENDING'
         st.session_state.revision_count = 0
+        st.session_state.show_revise_input = False
         st.session_state.agent = None
+        st.session_state.yojana = None
+        st.session_state.parikshak = None
         st.session_state.initialized = False
+        reset_state_manager()
         st.rerun()
 
 # Initialize on first load
@@ -174,6 +259,21 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✓ Approve", disabled=not can_act, key="approve_btn", use_container_width=True):
+            # If no itinerary has been synthesized yet, generate one now rather
+            # than declaring "approved and finalized" for something that was
+            # never actually built.
+            if not st.session_state.itinerary_text:
+                with st.spinner("🗺️ Generating itinerary before approval..."):
+                    generated = generate_itinerary()
+                if not generated:
+                    st.session_state.messages.append({
+                        "role": "system",
+                        "content": "⚠️ I don't have enough trip details yet to build an itinerary "
+                                    "(need at least a destination and one specialist's recommendations). "
+                                    "Please share more details in chat first, then approve."
+                    })
+                    st.rerun()
+
             action, details = st.session_state.feedback_handler.process_user_feedback(
                 "I approve this itinerary.",
                 st.session_state.itinerary
@@ -228,9 +328,35 @@ with st.sidebar:
                     "role": "user",
                     "content": f"Revision {st.session_state.revision_count}: {revision_feedback}"
                 })
+
+                # Actually call Yojana to revise and Parikshak to re-validate -
+                # this previously just printed a canned success message
+                # without doing either, leaving the itinerary unchanged.
+                with st.spinner(f"🔄 Yojana is revising (attempt {st.session_state.revision_count}/3)..."):
+                    try:
+                        revised_text = st.session_state.yojana.revise_itinerary(revision_feedback)
+                        st.session_state.itinerary_text = revised_text
+                        if st.session_state.itinerary:
+                            st.session_state.itinerary["summary"] = revised_text
+                    except Exception as e:
+                        logger.error(f"Revision error: {str(e)}")
+                        st.session_state.messages.append({
+                            "role": "system",
+                            "content": f"❌ Revision failed: {str(e)}"
+                        })
+                        st.rerun()
+
+                with st.spinner("🔍 Parikshak is re-validating..."):
+                    prefs = get_state_manager().get_preferences()
+                    st.session_state.validation_result = _run_validation(
+                        st.session_state.itinerary_text, prefs
+                    )
+
+                st.session_state.approval_state = 'CONDITIONAL'
                 st.session_state.messages.append({
                     "role": "system",
-                    "content": f"Processing revision (Attempt {st.session_state.revision_count}/3)...\n\n🔄 Yojana is updating the itinerary...\n\n🔍 Parikshak is re-validating...\n\n✅ Updated itinerary is ready!"
+                    "content": f"✅ Revision {st.session_state.revision_count}/3 complete — "
+                                f"updated itinerary and quality check are ready on the right →"
                 })
                 st.rerun()
 
@@ -279,40 +405,19 @@ with col1:
                     "content": response
                 })
 
-                # Trigger itinerary synthesis when user confirms trip details
-                if any(keyword in user_input.lower() for keyword in ["yes", "ok", "approve", "finalize", "create itinerary"]):
-                    state = get_state_manager().get_state()
-
-                    # Check if we have enough context
-                    if state["travel_preferences"]["destination"] and len(state["agent_responses"]) > 0:
-                        with st.spinner("🗺️ Yojana is synthesizing your itinerary..."):
-                            # Collect specialist outputs from shared state
-                            specialist_outputs = {
-                                "atithi": str(state["agent_responses"].get("atithi", "No hotel recommendations yet")),
-                                "annapurna": str(state["agent_responses"].get("annapurna", "No food recommendations yet")),
-                                "yatra": str(state["agent_responses"].get("yatra", "No attraction recommendations yet")),
-                                "safar": str(state["agent_responses"].get("safar", "No transport recommendations yet")),
-                                "bazaar": str(state["agent_responses"].get("bazaar", "No shopping recommendations yet")),
-                            }
-
-                            # Generate itinerary
-                            itinerary_text = st.session_state.yojana.create_itinerary(specialist_outputs)
-                            st.session_state.itinerary_text = itinerary_text
-
-                            # Parse into structured format
-                            st.session_state.itinerary = {
-                                "destination": state["travel_preferences"].get("destination", "TBD"),
-                                "duration": f"{state['travel_preferences'].get('num_days', 'N/A')} days",
-                                "travelers": f"{state['travel_preferences'].get('num_adults', 0)} adults, {state['travel_preferences'].get('num_children', 0)} children",
-                                "budget": f"₹{state['travel_preferences'].get('budget', 'TBD')}",
-                                "summary": itinerary_text
-                            }
-                            st.session_state.approval_state = 'CONDITIONAL'
-
+                # Trigger itinerary synthesis when user confirms trip details.
+                # Only generate once per session from chat (avoid re-synthesizing
+                # on every subsequent "yes"/"ok" once an itinerary already exists -
+                # the Revise flow handles updates after that point).
+                if not st.session_state.itinerary_text and _message_triggers_synthesis(user_input):
+                    with st.spinner("🗺️ Yojana is synthesizing your itinerary..."):
+                        if generate_itinerary():
                             st.session_state.messages.append({
                                 "role": "system",
-                                "content": f"🗺️ Itinerary created by Yojana!\n\n{itinerary_text[:500]}... (see full itinerary on the right →)"
+                                "content": f"🗺️ Itinerary created by Yojana!\n\n{st.session_state.itinerary_text[:500]}... (see full itinerary on the right →)"
                             })
+                        else:
+                            logger.info("Synthesis triggered but not enough context yet; skipping.")
 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
@@ -344,6 +449,19 @@ with col2:
                 with st.expander(f"📅 Day {day_info.get('day', '?')}"):
                     for activity in day_info.get('activities', []):
                         st.write(f"→ {activity}")
+
+        # Parikshak quality check - previously validated by a specialist agent
+        # that was instantiated but never actually invoked anywhere in the app.
+        if st.session_state.validation_result:
+            result_text = st.session_state.validation_result
+            if "REVISION REQUIRED" in result_text:
+                st.error("❌ Parikshak found issues — revision recommended before booking")
+            elif "CONDITIONAL" in result_text:
+                st.warning("⚠️ Parikshak approved with warnings")
+            elif "APPROVED" in result_text:
+                st.success("✅ Passed Parikshak's quality checks")
+            with st.expander("🔍 Quality Check Details (Parikshak)", expanded=False):
+                st.markdown(result_text)
 
         # Approval status
         st.divider()
