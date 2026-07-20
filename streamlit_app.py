@@ -156,7 +156,11 @@ with st.sidebar:
     # Status info
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Approval State", st.session_state.approval_state)
+        # Handle both string and dict approval_state
+        approval_val = st.session_state.approval_state
+        if isinstance(approval_val, dict):
+            approval_val = approval_val.get('approval_status', 'PENDING')
+        st.metric("Approval State", approval_val)
     with col2:
         st.metric("Revisions Used", f"{st.session_state.revision_count}/3")
 
@@ -174,7 +178,11 @@ with st.sidebar:
                 "I approve this itinerary.",
                 st.session_state.itinerary
             )
-            st.session_state.approval_state = details['approval_state']
+            # Extract approval status safely
+            if isinstance(details, dict):
+                st.session_state.approval_state = details.get('approval_status', details.get('approval_state', 'APPROVED'))
+            else:
+                st.session_state.approval_state = 'APPROVED'
             st.session_state.messages.append({
                 "role": "system",
                 "content": "✅ Itinerary approved and finalized! Ready for booking."
@@ -339,12 +347,18 @@ with col2:
 
         # Approval status
         st.divider()
-        if st.session_state.approval_state == 'PENDING':
+        approval_val = st.session_state.approval_state
+        if isinstance(approval_val, dict):
+            approval_val = approval_val.get('approval_status', 'PENDING')
+
+        if approval_val == 'PENDING':
             st.warning("⏳ Awaiting your approval")
-        elif st.session_state.approval_state == 'CONDITIONAL':
+        elif approval_val == 'CONDITIONAL':
             st.info("⚠️ Ready for approval - review and approve or revise")
-        elif st.session_state.approval_state == 'APPROVED':
+        elif approval_val == 'APPROVED':
             st.success("✅ Approved and finalized!")
+        else:
+            st.info(f"Status: {approval_val}")
     else:
         st.info("💭 Share your travel details and confirm (with 'yes' or 'ok') to generate an itinerary...")
 
