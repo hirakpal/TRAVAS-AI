@@ -13,6 +13,8 @@ load_dotenv()
 
 # Import agents
 from agents.sanchalak_agent import SanchalakAgent
+from agents.yojana_agent import YojanaAgent
+from agents.parikshak_agent import ParikshakAgent
 from agents.shared_state import initialize_state_manager, get_state_manager, reset_state_manager
 from agents.feedback_handler import FeedbackHandler
 from utils.logger import get_logger
@@ -83,9 +85,12 @@ st.markdown("""
 if 'initialized' not in st.session_state:
     st.session_state.initialized = False
     st.session_state.agent = None
+    st.session_state.yojana = None
+    st.session_state.parikshak = None
     st.session_state.feedback_handler = None
     st.session_state.messages = []
     st.session_state.itinerary = None
+    st.session_state.itinerary_text = None
     st.session_state.approval_state = 'PENDING'
     st.session_state.revision_count = 0
 
@@ -98,6 +103,8 @@ def initialize_session():
             return False
 
         st.session_state.agent = SanchalakAgent(api_key=api_key)
+        st.session_state.yojana = YojanaAgent(api_key=api_key)
+        st.session_state.parikshak = ParikshakAgent(api_key=api_key)
         st.session_state.feedback_handler = FeedbackHandler()
         st.session_state.initialized = True
 
@@ -264,22 +271,40 @@ with col1:
                     "content": response
                 })
 
-                # Create mock itinerary for demo
-                if "day" in user_input.lower() or "goa" in user_input.lower():
-                    st.session_state.itinerary = {
-                        "destination": "Goa",
-                        "duration": "5 days",
-                        "travelers": "Family",
-                        "budget": "₹45,000",
-                        "days": [
-                            {"day": 1, "activities": ["Flight arrival", "Hotel check-in", "Evening beach walk"]},
-                            {"day": 2, "activities": ["Baga Beach", "Water sports", "Dinner"]},
-                            {"day": 3, "activities": ["Full-day: Dudhsagar Waterfall", "Swimming"]},
-                            {"day": 4, "activities": ["Rest day", "Anjuna Market", "Fort Aguada sunset"]},
-                            {"day": 5, "activities": ["Last beach time", "Hotel checkout", "Flight departure"]},
-                        ]
-                    }
-                    st.session_state.approval_state = 'CONDITIONAL'
+                # Trigger itinerary synthesis when user confirms trip details
+                if any(keyword in user_input.lower() for keyword in ["yes", "ok", "approve", "finalize", "create itinerary"]):
+                    state = get_state_manager().get_state()
+
+                    # Check if we have enough context
+                    if state["travel_preferences"]["destination"] and len(state["agent_responses"]) > 0:
+                        with st.spinner("🗺️ Yojana is synthesizing your itinerary..."):
+                            # Collect specialist outputs from shared state
+                            specialist_outputs = {
+                                "atithi": str(state["agent_responses"].get("atithi", "No hotel recommendations yet")),
+                                "annapurna": str(state["agent_responses"].get("annapurna", "No food recommendations yet")),
+                                "yatra": str(state["agent_responses"].get("yatra", "No attraction recommendations yet")),
+                                "safar": str(state["agent_responses"].get("safar", "No transport recommendations yet")),
+                                "bazaar": str(state["agent_responses"].get("bazaar", "No shopping recommendations yet")),
+                            }
+
+                            # Generate itinerary
+                            itinerary_text = st.session_state.yojana.create_itinerary(specialist_outputs)
+                            st.session_state.itinerary_text = itinerary_text
+
+                            # Parse into structured format
+                            st.session_state.itinerary = {
+                                "destination": state["travel_preferences"].get("destination", "TBD"),
+                                "duration": f"{state['travel_preferences'].get('num_days', 'N/A')} days",
+                                "travelers": f"{state['travel_preferences'].get('num_adults', 0)} adults, {state['travel_preferences'].get('num_children', 0)} children",
+                                "budget": f"₹{state['travel_preferences'].get('budget', 'TBD')}",
+                                "summary": itinerary_text
+                            }
+                            st.session_state.approval_state = 'CONDITIONAL'
+
+                            st.session_state.messages.append({
+                                "role": "system",
+                                "content": f"🗺️ Itinerary created by Yojana!\n\n{itinerary_text[:500]}... (see full itinerary on the right →)"
+                            })
 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
@@ -301,22 +326,27 @@ with col2:
         Budget: {itinerary.get('budget', 'TBD')}
         """)
 
-        # Days
-        for day_info in itinerary.get('days', []):
-            with st.expander(f"📅 Day {day_info.get('day', '?')}"):
-                for activity in day_info.get('activities', []):
-                    st.write(f"→ {activity}")
+        # Show full itinerary text if available
+        if st.session_state.itinerary_text:
+            with st.expander("📅 Full Itinerary", expanded=True):
+                st.markdown(st.session_state.itinerary_text)
+        # Fallback to day-by-day if structured data available
+        elif itinerary.get('days'):
+            for day_info in itinerary.get('days', []):
+                with st.expander(f"📅 Day {day_info.get('day', '?')}"):
+                    for activity in day_info.get('activities', []):
+                        st.write(f"→ {activity}")
 
         # Approval status
         st.divider()
         if st.session_state.approval_state == 'PENDING':
             st.warning("⏳ Awaiting your approval")
         elif st.session_state.approval_state == 'CONDITIONAL':
-            st.info("⚠️ Approved with notes")
+            st.info("⚠️ Ready for approval - review and approve or revise")
         elif st.session_state.approval_state == 'APPROVED':
             st.success("✅ Approved and finalized!")
     else:
-        st.info("💭 Share your travel details to generate an itinerary...")
+        st.info("💭 Share your travel details and confirm (with 'yes' or 'ok') to generate an itinerary...")
 
 # ============================================================================
 # FOOTER
