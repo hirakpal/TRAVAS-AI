@@ -16,7 +16,10 @@ load_dotenv()
 from agents.sanchalak_agent import SanchalakAgent
 from agents.yojana_agent import YojanaAgent
 from agents.parikshak_agent import ParikshakAgent
-from agents.shared_state import initialize_state_manager, get_state_manager, reset_state_manager, format_budget
+from agents.shared_state import (
+    initialize_state_manager, get_state_manager, reset_state_manager,
+    format_budget, is_real_itinerary,
+)
 from agents.feedback_handler import FeedbackHandler
 from utils.logger import get_logger
 
@@ -65,41 +68,23 @@ def _can_generate_itinerary() -> bool:
     return bool(state["travel_preferences"].get("destination")) and len(real_specialist_responses) >= 2
 
 
-def _run_validation(itinerary_text: str, prefs: dict) -> str:
+def _run_validation(itinerary_text: str, prefs: dict, deterministic_findings: dict = None) -> str:
     """Run Parikshak's quality checks on a draft itinerary.
 
     Parikshak is the quality gate between Yojana's draft and the user (per
     its own system prompt) - it was previously instantiated but never
-    actually invoked anywhere in the app.
+    actually invoked anywhere in the app. deterministic_findings (from
+    Yojana's contract-validation pass) is passed through so Parikshak treats
+    real overlap/budget checks as confirmed facts instead of re-deriving
+    them from prose.
     """
     try:
-        return st.session_state.parikshak.validate_itinerary(itinerary_text, dict(prefs))
+        return st.session_state.parikshak.validate_itinerary(
+            itinerary_text, dict(prefs), deterministic_findings=deterministic_findings
+        )
     except Exception as e:
         logger.error(f"Parikshak validation error: {str(e)}")
         return "⚠️ Validation could not be completed automatically. Please review the itinerary manually before approving."
-
-
-# Markers that appear in Yojana's own "I can't build a draft yet" refusal
-# text (its correct, designed behavior when specialist input is too thin).
-# A refusal is valid and useful to show the user, but it is NOT a finished
-# itinerary. Treating it as one previously caused the sidebar panel to get
-# permanently stuck: the refusal text got written to itinerary_text, which
-# then blocked every future synthesis attempt for the rest of the session
-# (see "once per session" gate below) - so even after a genuine itinerary
-# was later produced, the panel never updated to show it.
-REFUSAL_MARKERS = [
-    "insufficient specialist input",
-    "cannot produce a meaningful draft",
-    "there is no itinerary to validate",
-]
-
-
-def _is_real_itinerary(text: str) -> bool:
-    """True if Yojana actually produced a draft, False if it refused."""
-    if not text:
-        return False
-    lower = text.lower()
-    return not any(marker in lower for marker in REFUSAL_MARKERS)
 
 
 def generate_itinerary() -> bool:
@@ -124,8 +109,14 @@ def generate_itinerary() -> bool:
 
     itinerary_text = st.session_state.yojana.create_itinerary(specialist_outputs)
     st.session_state.itinerary_text = itinerary_text
-    is_real = _is_real_itinerary(itinerary_text)
+    is_real = is_real_itinerary(itinerary_text)
     st.session_state.itinerary_ready = is_real
+
+    # Yojana's create_itinerary() also runs a forced structured-submission +
+    # deterministic validation pass (contract validation) when the draft is
+    # real - pick up its results here so the UI and Parikshak can use them.
+    st.session_state.structured_validation_issues = list(st.session_state.yojana.structured_validation_issues)
+    st.session_state.structured_validation_warnings = list(st.session_state.yojana.structured_validation_warnings)
 
     prefs = state["travel_preferences"]
     st.session_state.itinerary = {
@@ -137,7 +128,11 @@ def generate_itinerary() -> bool:
     }
 
     if is_real:
-        st.session_state.validation_result = _run_validation(itinerary_text, prefs)
+        deterministic_findings = {
+            "issues": st.session_state.structured_validation_issues,
+            "warnings": st.session_state.structured_validation_warnings,
+        }
+        st.session_state.validation_result = _run_validation(itinerary_text, prefs, deterministic_findings)
         st.session_state.approval_state = 'CONDITIONAL'
     else:
         # Don't run Parikshak on a refusal (there's nothing to validate) and
@@ -260,6 +255,8 @@ if 'initialized' not in st.session_state:
     st.session_state.itinerary_text = None
     st.session_state.itinerary_ready = False
     st.session_state.validation_result = None
+    st.session_state.structured_validation_issues = []
+    st.session_state.structured_validation_warnings = []
     st.session_state.approval_state = 'PENDING'
     st.session_state.revision_count = 0
     st.session_state.show_revise_input = False
@@ -306,6 +303,8 @@ def _reset_trip_session():
     st.session_state.itinerary_text = None
     st.session_state.itinerary_ready = False
     st.session_state.validation_result = None
+    st.session_state.structured_validation_issues = []
+    st.session_state.structured_validation_warnings = []
     st.session_state.approval_state = 'PENDING'
     st.session_state.revision_count = 0
     st.session_state.show_revise_input = False
@@ -515,6 +514,15 @@ with st.sidebar:
                                 st.session_state.itinerary_text = revised_text
                                 if st.session_state.itinerary:
                                     st.session_state.itinerary["summary"] = revised_text
+                                # revise_itinerary() also re-runs the forced
+                                # structured-submission + deterministic
+                                # validation pass - pick up its fresh results.
+                                st.session_state.structured_validation_issues = list(
+                                    st.session_state.yojana.structured_validation_issues
+                                )
+                                st.session_state.structured_validation_warnings = list(
+                                    st.session_state.yojana.structured_validation_warnings
+                                )
                             except Exception as e:
                                 logger.error(f"Revision error: {str(e)}")
                                 st.session_state.messages.append({
@@ -525,8 +533,12 @@ with st.sidebar:
 
                         with st.spinner("🔍 Parikshak is re-validating..."):
                             prefs = get_state_manager().get_preferences()
+                            deterministic_findings = {
+                                "issues": st.session_state.structured_validation_issues,
+                                "warnings": st.session_state.structured_validation_warnings,
+                            }
                             st.session_state.validation_result = _run_validation(
-                                st.session_state.itinerary_text, prefs
+                                st.session_state.itinerary_text, prefs, deterministic_findings
                             )
 
                         st.session_state.approval_state = 'CONDITIONAL'
@@ -637,6 +649,24 @@ with col2:
                 with st.expander(f"📅 Day {day_info.get('day', '?')}"):
                     for activity in day_info.get('activities', []):
                         st.write(f"→ {activity}")
+
+        # Contract validation - deterministic checks (overlap times, budget,
+        # valid day numbers, valid activity types) run against Yojana's
+        # structured submit_itinerary output, NOT an LLM judgment call. Shown
+        # separately from Parikshak below since these are confirmed facts,
+        # not opinions.
+        det_issues = st.session_state.get('structured_validation_issues') or []
+        det_warnings = st.session_state.get('structured_validation_warnings') or []
+        if det_issues or det_warnings:
+            if det_issues:
+                st.error(f"❌ Contract validation: {len(det_issues)} confirmed issue(s) in the structured plan")
+            else:
+                st.warning(f"⚠️ Contract validation: {len(det_warnings)} warning(s)")
+            with st.expander("🧩 Contract Validation Details (deterministic)", expanded=bool(det_issues)):
+                for i in det_issues:
+                    st.markdown(f"- ❌ {i}")
+                for w in det_warnings:
+                    st.markdown(f"- ⚠️ {w}")
 
         # Parikshak quality check - previously validated by a specialist agent
         # that was instantiated but never actually invoked anywhere in the app.
