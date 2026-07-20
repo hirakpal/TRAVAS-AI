@@ -1,12 +1,13 @@
 """Sanchalak Agent - Master Orchestrator
 
 Sanchalak (संचालक) means "Conductor/Orchestrator" in Hindi.
-Routes travel queries to appropriate specialist agents.
+Routes travel queries to appropriate specialist agents using shared state.
 """
 
 import os
 from typing import Optional, Dict, List
 from agents.atithi_agent import AtithiAgent
+from agents.shared_state import get_state_manager
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -17,7 +18,7 @@ class SanchalakAgent:
 
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize Sanchalak with available agents
+        Initialize Sanchalak with available agents and shared state
 
         Args:
             api_key: Anthropic API key
@@ -37,6 +38,9 @@ class SanchalakAgent:
         # Track which agent was used
         self.last_agent_used = None
         self.conversation_history = []
+
+        # Initialize shared state manager
+        self.state_manager = get_state_manager()
 
     def identify_intent(self, message: str) -> str:
         """
@@ -77,7 +81,7 @@ class SanchalakAgent:
 
     def route_query(self, message: str) -> Dict:
         """
-        Route user query to appropriate agent
+        Route user query to appropriate agent with shared state tracking
 
         Args:
             message: User message
@@ -85,29 +89,44 @@ class SanchalakAgent:
         Returns:
             response: Agent response with metadata
         """
+        # Mark Sanchalak as orchestrating in shared state
+        self.state_manager.add_message("user", message, agent="sanchalak")
+        self.state_manager.set_active_agent("sanchalak")
+        self.state_manager.state["orchestrator_active"] = True
+
         # Identify which agent should handle this
         agent_name = self.identify_intent(message)
+        logger.info(f"Sanchalak routing to {agent_name}")
 
         # Get the agent
         if agent_name not in self.agents:
+            error_msg = f"Agent '{agent_name}' not available"
+            self.state_manager.add_message("assistant", error_msg, agent="sanchalak")
             return {
                 "success": False,
-                "message": f"Agent '{agent_name}' not available",
+                "message": error_msg,
                 "agent": None
             }
 
         agent = self.agents[agent_name]
         self.last_agent_used = agent_name
 
-        # Get response from agent
+        # Route to agent (agent will update shared state on its own)
         try:
             response_text = agent.chat(message)
 
-            # Track conversation
+            # Track conversation locally
             self.conversation_history.append({
                 "user_message": message,
                 "agent_used": agent_name,
                 "agent_response": response_text
+            })
+
+            # Store routing decision in shared state
+            self.state_manager.add_metadata("last_routing", {
+                "orchestrator": "sanchalak",
+                "routed_to": agent_name,
+                "user_message": message
             })
 
             return {
@@ -119,9 +138,11 @@ class SanchalakAgent:
 
         except Exception as e:
             logger.error(f"Agent {agent_name} error: {str(e)}")
+            error_response = f"Error from {agent_name}: {str(e)}"
+            self.state_manager.add_message("assistant", error_response, agent="sanchalak")
             return {
                 "success": False,
-                "message": f"Error from {agent_name}: {str(e)}",
+                "message": error_response,
                 "agent": agent_name
             }
 
@@ -156,13 +177,30 @@ class SanchalakAgent:
             }
         }
 
+    def get_shared_preferences(self) -> Dict:
+        """Get current travel preferences from shared state."""
+        return dict(self.state_manager.get_preferences())
+
+    def get_conversation_context(self) -> Dict:
+        """Get full conversation context from shared state."""
+        return self.state_manager.get_agent_context("sanchalak")
+
+    def get_active_agents(self) -> List[str]:
+        """Get list of active agents from shared state."""
+        return self.state_manager.get_state()["active_agents"]
+
+    def get_all_agent_responses(self) -> Dict:
+        """Get responses from all agents."""
+        return self.state_manager.get_state()["agent_responses"]
+
     def reset(self) -> None:
         """Reset all agents and history"""
         for agent in self.agents.values():
             agent.reset()
         self.last_agent_used = None
         self.conversation_history = []
+        self.state_manager.state["orchestrator_active"] = False
         logger.info("Sanchalak orchestrator reset")
 
     def __repr__(self) -> str:
-        return f"<SanchalakAgent agents={len(self.agents)} last_used={self.last_agent_used}>"
+        return f"<SanchalakAgent agents={len(self.agents)} last_used={self.last_agent_used} with_shared_state=True>"
