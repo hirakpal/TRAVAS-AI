@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 import anthropic
 
 from agents.base_agent import BaseAgent
-from agents.shared_state import get_state_manager, format_budget
+from agents.shared_state import get_state_manager, enrich_message_with_context
 from tools.shopping_tools import SHOPPING_TOOLS
 from models.shopping import ShoppingPreferences
 from utils.logger import get_logger
@@ -35,9 +35,11 @@ Help travelers find authentic souvenirs and local products that represent the de
 🔴 MANDATORY FIRST STEP BEFORE ANYTHING ELSE:
 1. Look at the user's message carefully
 2. If you see a section starting with "CONTEXT FROM EARLIER CONVERSATION:" then:
-   - Extract DESTINATION (city/area)
-   - Extract dates, travelers, budget, accommodation area
-   - These are FACTS you already know - DO NOT ask about them again
+   - Extract whatever is present: destination, accommodation area, dates, trip duration, number of
+     travelers, budget, and stated interests
+   - Note: total trip budget shown in context is NOT the same as shopping budget - still ask about
+     shopping-specific budget unless the user already stated it in the shopping conversation itself
+   - These are FACTS you already know - DO NOT ask about destination/dates/travelers again
 3. If you see "USER REQUEST:" section, that's what they're asking about now
 4. Only ask for information NOT mentioned in either section
 
@@ -282,23 +284,10 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
             self.state_manager.add_message("user", user_message, agent="bazaar")
             self.state_manager.set_active_agent("bazaar")
 
-            # Enrich user message with shared state context
+            # Enrich user message with shared state context (single shared
+            # builder used identically by every specialist - see shared_state.py)
             prefs = self.state_manager.get_preferences()
-            context_parts = []
-            if prefs.get("destination"):
-                context_parts.append(f"Destination: {prefs['destination']}")
-            if prefs.get("accommodation_area"):
-                context_parts.append(f"Area: {prefs['accommodation_area']}")
-            if prefs.get("checkin_date"):
-                context_parts.append(f"Dates: {prefs['checkin_date']} to {prefs.get('checkout_date', '?')}")
-            if prefs.get("num_days"):
-                context_parts.append(f"Duration: {prefs['num_days']} days")
-            if prefs.get("budget"):
-                context_parts.append(f"Budget: {format_budget(prefs['budget'])}")
-
-            if context_parts:
-                enriched_message = f"CONTEXT FROM EARLIER CONVERSATION:\n{' | '.join(context_parts)}\n\nUSER REQUEST:\n{user_message}"
-                user_message = enriched_message
+            user_message = enrich_message_with_context(user_message, prefs)
 
             self.add_to_history("user", user_message)
             self.tools_used_count = 0

@@ -21,6 +21,65 @@ def format_budget(value: Any) -> str:
         return f"₹{value}"
 
 
+def build_context_summary(prefs: dict) -> str:
+    """Build a single, consistent context summary string from shared-state
+    travel preferences, for injecting into a specialist's user message.
+
+    This is the single source of truth for "what does the shared state know
+    so far" - every specialist calls this same function instead of each
+    hand-rolling its own subset of fields. Previously each of the 5
+    specialist agents built its own slightly different field list (e.g.
+    Annapurna never included trip duration, Yatra never included the
+    accommodation area, Bazaar never included traveler counts), which meant
+    a fact captured while talking to one specialist could still be invisible
+    to another. Including ALL known fields here removes that drift - each
+    specialist's own system prompt is responsible for using only what's
+    relevant to its domain and ignoring the rest.
+
+    Returns an empty string if nothing is known yet.
+    """
+    parts = []
+    if prefs.get("source_city"):
+        parts.append(f"Departing from: {prefs['source_city']}")
+    if prefs.get("destination"):
+        parts.append(f"Destination: {prefs['destination']}")
+    if prefs.get("accommodation_area"):
+        parts.append(f"Accommodation area: {prefs['accommodation_area']}")
+    if prefs.get("checkin_date"):
+        parts.append(f"Check-in: {prefs['checkin_date']}")
+    if prefs.get("checkout_date"):
+        parts.append(f"Check-out: {prefs['checkout_date']}")
+    if prefs.get("num_days"):
+        parts.append(f"Trip duration: {prefs['num_days']} days")
+    if prefs.get("num_adults") or prefs.get("num_children"):
+        travelers = f"{prefs.get('num_adults', 0)} adults"
+        if prefs.get("num_children"):
+            travelers += f", {prefs['num_children']} children"
+        parts.append(f"Travelers: {travelers}")
+    if prefs.get("num_rooms"):
+        parts.append(f"Rooms needed: {prefs['num_rooms']}")
+    if prefs.get("budget"):
+        parts.append(f"Budget: {format_budget(prefs['budget'])}")
+    if prefs.get("dietary_restrictions"):
+        parts.append(f"Dietary restrictions: {', '.join(prefs['dietary_restrictions'])}")
+    if prefs.get("accessibility_needs"):
+        parts.append(f"Accessibility needs: {', '.join(prefs['accessibility_needs'])}")
+    if prefs.get("preferred_activities"):
+        parts.append(f"Stated interests: {', '.join(prefs['preferred_activities'])}")
+
+    return " | ".join(parts)
+
+
+def enrich_message_with_context(user_message: str, prefs: dict) -> str:
+    """Wrap a user message with the standard context block, if any context
+    is known yet. Used identically by every specialist agent's chat().
+    """
+    summary = build_context_summary(prefs)
+    if not summary:
+        return user_message
+    return f"CONTEXT FROM EARLIER CONVERSATION:\n{summary}\n\nUSER REQUEST:\n{user_message}"
+
+
 class TravelPreferences(TypedDict):
     """Shared travel preferences across all agents"""
     destination: Optional[str]
@@ -133,6 +192,13 @@ class StateManager:
         self.state["conversation_history"].append(message)
         self._update_timestamp()
 
+    # List-type preference fields are MERGED with existing values rather than
+    # overwritten. An LLM-based extractor only returns what's new/mentioned in
+    # the current message, so overwriting would silently drop previously
+    # captured facts - e.g. mentioning "gluten-free" in a later turn would
+    # otherwise erase an earlier "vegetarian" dietary restriction.
+    LIST_PREFERENCE_FIELDS = {"dietary_restrictions", "accessibility_needs", "preferred_activities"}
+
     def update_preferences(self, updates: dict):
         """Update travel preferences.
 
@@ -143,10 +209,19 @@ class StateManager:
         """
         unknown_keys = []
         for key, value in updates.items():
-            if key in self.state["travel_preferences"]:
-                self.state["travel_preferences"][key] = value
-            else:
+            if key not in self.state["travel_preferences"]:
                 unknown_keys.append(key)
+                continue
+
+            if key in self.LIST_PREFERENCE_FIELDS and isinstance(value, list):
+                existing = self.state["travel_preferences"].get(key) or []
+                merged = list(existing)
+                for item in value:
+                    if item not in merged:
+                        merged.append(item)
+                self.state["travel_preferences"][key] = merged
+            else:
+                self.state["travel_preferences"][key] = value
         if unknown_keys:
             import logging
             logging.getLogger(__name__).debug(

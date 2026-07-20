@@ -156,13 +156,17 @@ Return a JSON object with ONLY the NEW or UPDATED fields found in this message (
   "num_days": integer trip duration in days if mentioned,
   "num_adults": integer count of adult travelers if determinable from context,
   "num_children": integer count of children if mentioned,
+  "num_rooms": integer number of hotel rooms needed if mentioned,
   "budget": numeric budget value if a rupee amount is mentioned,
+  "dietary_restrictions": ["list", "of", "restrictions"] if mentioned (e.g. vegetarian, vegan, jain, gluten-free, no dietary preference should NOT be added as a restriction),
+  "accessibility_needs": ["list", "of", "needs"] if mentioned (e.g. wheelchair access, elderly travelers needing less walking, mobility constraints),
   "preferred_activities": ["list", "of", "interests"] if mentioned
 }}
 
 Rules:
 - Only include a field if the message provides new/updated information for it.
 - For traveler counts: "couple" = 2 adults; "family of 4" = 4 adults (use judgment); "me, wife, elderly parents" = 4 adults; explicit numbers like "4 people" = 4 adults unless children are specified separately.
+- Note: "elderly parents" or "senior travelers" traveling along is itself a signal worth adding to accessibility_needs (e.g. "comfortable pacing for elderly travelers"), even without an explicit accessibility request.
 - If nothing is extractable, return {{}}.
 - Output must be valid JSON only."""
 

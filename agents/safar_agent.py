@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Generator, Any
 import anthropic
 
 from agents.base_agent import BaseAgent
-from agents.shared_state import get_state_manager, format_budget
+from agents.shared_state import get_state_manager, enrich_message_with_context
 from tools.transport_tools import TRANSPORT_TOOLS
 from models.transport import TransportPreferences
 from utils.logger import get_logger
@@ -35,7 +35,9 @@ Help travelers choose the best transport options (flights, trains, buses, taxis,
 🔴 MANDATORY FIRST STEP BEFORE ANYTHING ELSE:
 1. Look at the user's message carefully
 2. If you see a section starting with "CONTEXT FROM EARLIER CONVERSATION:" then:
-   - Extract DESTINATION, travel dates, number of travelers, budget, accommodation area
+   - Extract whatever is present: departure city, destination, accommodation area, travel dates,
+     trip duration, number of travelers, budget, and accessibility needs (e.g. elderly travelers
+     needing more comfortable transport)
    - These are FACTS you already know - DO NOT ask about them again
 3. If you see "USER REQUEST:" section, that's what they're asking about now
 4. Only ask for information NOT mentioned in either section
@@ -341,30 +343,10 @@ Provide complete journey planning from start to finish."""
             self.state_manager.add_message("user", user_message, agent="safar")
             self.state_manager.set_active_agent("safar")
 
-            # Enrich user message with shared state context
+            # Enrich user message with shared state context (single shared
+            # builder used identically by every specialist - see shared_state.py)
             prefs = self.state_manager.get_preferences()
-            context_parts = []
-            if prefs.get("source_city"):
-                context_parts.append(f"Departing from: {prefs['source_city']}")
-            if prefs.get("destination"):
-                context_parts.append(f"Destination: {prefs['destination']}")
-            if prefs.get("accommodation_area"):
-                context_parts.append(f"Area: {prefs['accommodation_area']}")
-            if prefs.get("checkin_date"):
-                context_parts.append(f"Dates: {prefs['checkin_date']} to {prefs.get('checkout_date', '?')}")
-            if prefs.get("num_days"):
-                context_parts.append(f"Duration: {prefs['num_days']} days")
-            if prefs.get("num_adults") or prefs.get("num_children"):
-                travelers = f"{prefs.get('num_adults', 0)} adults"
-                if prefs.get("num_children"):
-                    travelers += f", {prefs['num_children']} children"
-                context_parts.append(f"Travelers: {travelers}")
-            if prefs.get("budget"):
-                context_parts.append(f"Budget: {format_budget(prefs['budget'])}")
-
-            if context_parts:
-                enriched_message = f"CONTEXT FROM EARLIER CONVERSATION:\n{' | '.join(context_parts)}\n\nUSER REQUEST:\n{user_message}"
-                user_message = enriched_message
+            user_message = enrich_message_with_context(user_message, prefs)
 
             # Add to local history
             self.add_to_history("user", user_message)

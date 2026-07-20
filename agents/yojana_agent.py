@@ -190,8 +190,14 @@ class YojanaAgent(BaseAgent):
             if prefs.get("num_children"):
                 travelers += f", {prefs['num_children']} children"
             facts.append(f"- Travelers: {travelers}")
+        if prefs.get("num_rooms"):
+            facts.append(f"- Rooms needed: {prefs['num_rooms']}")
         if prefs.get("budget"):
             facts.append(f"- Total budget: {format_budget(prefs['budget'])}")
+        if prefs.get("dietary_restrictions"):
+            facts.append(f"- Dietary restrictions: {', '.join(prefs['dietary_restrictions'])}")
+        if prefs.get("accessibility_needs"):
+            facts.append(f"- Accessibility/pacing needs: {', '.join(prefs['accessibility_needs'])}")
         if prefs.get("preferred_activities"):
             facts.append(f"- Stated interests: {', '.join(prefs['preferred_activities'])}")
 
