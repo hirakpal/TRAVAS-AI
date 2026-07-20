@@ -143,9 +143,9 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-opus-4-8",
         max_history: int = 20,
-        temperature: float = 0.7,
+        
     ):
         """Initialize Atithi Agent.
 
