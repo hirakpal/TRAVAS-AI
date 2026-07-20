@@ -1,12 +1,14 @@
 """Sanchalak Agent - Master Orchestrator
 
 Sanchalak (संचालक) means "Conductor/Orchestrator" in Hindi.
-Routes travel queries to appropriate specialist agents using shared state.
-Uses AgentRegistry factory pattern for agent instantiation.
+Chats naturally with travelers and routes to specialist agents using shared state.
+Uses AgentRegistry factory pattern for agent instantiation and Claude for conversation.
 """
 
 import os
 from typing import Optional, Dict, List
+import anthropic
+
 from agents.registry import AgentRegistry
 from agents.shared_state import get_state_manager
 from utils.logger import get_logger
@@ -15,25 +17,96 @@ logger = get_logger(__name__)
 
 
 class SanchalakAgent:
-    """Master orchestrator that routes queries to specialist agents"""
+    """Master orchestrator that chats naturally and coordinates specialist agents"""
+
+    SYSTEM_PROMPT = """You are Sanchalak (संचालक - Conductor/Orchestrator), the master travel assistant.
+
+Your role is to:
+1. Chat naturally with travelers to understand their needs
+2. Identify which specialist agents they need (hotels, food, tours, transport, shopping)
+3. Route queries to appropriate specialists
+4. Synthesize recommendations from multiple agents into cohesive itineraries
+
+## HOW YOU WORK
+
+PHASE 1: UNDERSTAND THE JOURNEY
+Ask about destination, dates, travelers, and trip type. Gather info naturally across 2-3 turns.
+
+PHASE 2: IDENTIFY SPECIALISTS NEEDED
+Based on trip type, determine which agents help:
+- Atithi → Hotels/accommodation (everyone)
+- Annapurna → Food/restaurants (if interested in dining)
+- Yatra → Tours/attractions (if interested in activities)
+- Safar → Transport (if needs flights/trains/local travel)
+- Bazaar → Shopping (if interested in shopping)
+
+PHASE 3: COORDINATE SPECIALISTS
+When routing, explicitly say:
+"Let me check with my hotel specialist (Atithi) about..."
+"My food expert (Annapurna) can recommend..."
+
+PHASE 4: SYNTHESIZE
+Connect recommendations: "Hotel X is near Attraction Y, and Restaurant Z is walking distance"
+
+## CONVERSATION RULES
+
+✅ Ask 1-2 questions per turn
+✅ Remember what they said earlier
+✅ Route when user asks about specific topics
+✅ Synthesize multi-agent responses
+✅ Acknowledge preferences and constraints
+✅ Provide alternatives
+
+❌ Don't overwhelm with all agents at once
+❌ Don't forget earlier messages
+❌ Don't route before understanding basic needs
+❌ Don't ask same question twice
+
+## ROUTING KEYWORDS
+
+Route to ATITHI (hotels) when user mentions:
+"hotel", "accommodation", "stay", "room", "resort", "booking", "where to stay"
+
+Route to ANNAPURNA (food) when user mentions:
+"restaurant", "food", "eat", "dining", "cuisine", "vegetarian", "breakfast"
+
+Route to YATRA (tours) when user mentions:
+"attraction", "tour", "visit", "sightseeing", "activity", "what to see", "place"
+
+Route to SAFAR (transport) when user mentions:
+"flight", "train", "bus", "transport", "taxi", "travel", "how to get"
+
+Route to BAZAAR (shopping) when user mentions:
+"shopping", "shop", "mall", "market", "buy", "souvenir"
+
+## IMPORTANT
+
+Only route when:
+1. User asks specific question about an agent's domain
+2. You've gathered enough context
+3. User explicitly asks for that specialist
+
+For general questions, chat naturally without routing."""
 
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize Sanchalak with available agents from registry and shared state
+        Initialize Sanchalak with Claude, specialist agents, and shared state
 
         Args:
             api_key: Anthropic API key
         """
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        self.client = anthropic.Anthropic(api_key=self.api_key)
+        self.model = "claude-opus-4-8"
 
         # Initialize available agents from registry
         self.agents = {}
         for agent_name in AgentRegistry.list_agents():
             try:
                 self.agents[agent_name] = AgentRegistry.get(agent_name, api_key=self.api_key)
-                logger.info(f"Loaded agent: {agent_name}")
+                logger.info(f"Loaded specialist: {agent_name}")
             except Exception as e:
-                logger.error(f"Failed to load agent '{agent_name}': {str(e)}")
+                logger.error(f"Failed to load specialist '{agent_name}': {str(e)}")
 
         # Track which agent was used
         self.last_agent_used = None
@@ -42,139 +115,162 @@ class SanchalakAgent:
         # Initialize shared state manager
         self.state_manager = get_state_manager()
 
-    def identify_intent(self, message: str) -> str:
-        """
-        Simple intent recognition based on keywords
+    def _identify_routing_intent(self, message: str) -> Optional[str]:
+        """Identify if message should be routed to a specialist.
 
         Args:
             message: User message
 
         Returns:
-            agent_name: Name of agent to handle this
+            agent_name if routing needed, None otherwise
         """
         message_lower = message.lower()
 
-        # Keywords for each agent
-        keywords = {
-            "atithi": [
-                "hotel", "accommodation", "stay", "room",
-                "where to stay", "booking", "lodge",
-                "resort", "motel", "hostel", "guest house"
-            ],
-            # Add more agents as they're built
-            # "annapurna": ["restaurant", "food", "eat", "dining", "cafe", "cuisine"],
-            # "yatra": ["attraction", "tour", "visit", "sightseeing", "itinerary", "place"],
-            # "safar": ["flight", "train", "bus", "transport", "travel", "taxi"],
-            # "bazaar": ["shopping", "shop", "mall", "market", "buy", "store"],
+        routing_keywords = {
+            "atithi": ["hotel", "accommodation", "stay", "room", "resort", "booking", "lodge"],
+            "annapurna": ["restaurant", "food", "eat", "dining", "cuisine", "breakfast", "vegetarian"],
+            "yatra": ["attraction", "tour", "visit", "sightseeing", "activity", "what to see", "place"],
+            "safar": ["flight", "train", "bus", "transport", "taxi", "travel", "how to get"],
+            "bazaar": ["shopping", "shop", "mall", "market", "buy", "souvenir"],
         }
 
-        # Check which keywords match
-        for agent_name, agent_keywords in keywords.items():
-            for keyword in agent_keywords:
-                if keyword in message_lower:
-                    logger.info(f"Intent identified: {agent_name} (matched keyword: {keyword})")
+        # Check keyword matches
+        for agent_name, keywords in routing_keywords.items():
+            for keyword in keywords:
+                if keyword in message_lower and agent_name in self.agents:
+                    logger.info(f"Routing to {agent_name} (matched: {keyword})")
                     return agent_name
 
-        # Default to Atithi if no match
-        logger.info("Intent unclear, defaulting to Atithi")
-        return "atithi"
+        return None
 
-    def route_query(self, message: str) -> Dict:
-        """
-        Route user query to appropriate agent with shared state tracking
+    def _route_to_specialist(self, agent_name: str, message: str) -> str:
+        """Route message to specialist agent.
 
         Args:
+            agent_name: Name of specialist agent
             message: User message
 
         Returns:
-            response: Agent response with metadata
+            Specialist's response
         """
-        # Mark Sanchalak as orchestrating in shared state
-        self.state_manager.add_message("user", message, agent="sanchalak")
-        self.state_manager.set_active_agent("sanchalak")
-        self.state_manager.state["orchestrator_active"] = True
-
-        # Identify which agent should handle this
-        agent_name = self.identify_intent(message)
-        logger.info(f"Sanchalak routing to {agent_name}")
-
-        # Get the agent
         if agent_name not in self.agents:
-            error_msg = f"Agent '{agent_name}' not available"
-            self.state_manager.add_message("assistant", error_msg, agent="sanchalak")
-            return {
-                "success": False,
-                "message": error_msg,
-                "agent": None
-            }
+            return f"I don't have a specialist for that yet."
 
         agent = self.agents[agent_name]
         self.last_agent_used = agent_name
 
-        # Route to agent (agent will update shared state on its own)
         try:
-            response_text = agent.chat(message)
-
-            # Track conversation locally
-            self.conversation_history.append({
-                "user_message": message,
-                "agent_used": agent_name,
-                "agent_response": response_text
-            })
-
-            # Store routing decision in shared state
-            self.state_manager.add_metadata("last_routing", {
-                "orchestrator": "sanchalak",
-                "routed_to": agent_name,
-                "user_message": message
-            })
-
-            return {
-                "success": True,
-                "message": response_text,
-                "agent": agent_name,
-                "history_count": agent.get_history_count()
-            }
-
+            response = agent.chat(message)
+            logger.info(f"Specialist {agent_name} responded")
+            return response
         except Exception as e:
-            logger.error(f"Agent {agent_name} error: {str(e)}")
-            error_response = f"Error from {agent_name}: {str(e)}"
-            self.state_manager.add_message("assistant", error_response, agent="sanchalak")
-            return {
-                "success": False,
-                "message": error_response,
-                "agent": agent_name
-            }
+            logger.error(f"Specialist {agent_name} error: {str(e)}")
+            return f"My {agent_name} specialist encountered an issue. Please try again."
 
-    def chat(self, message: str) -> str:
-        """
-        Simple chat interface - main entry point
+    def route_query(self, message: str) -> str:
+        """Process user query: chat naturally or route to specialist.
 
         Args:
             message: User message
 
         Returns:
-            response: Agent response
+            Response from Sanchalak or routed specialist
         """
-        response = self.route_query(message)
+        if not message or not message.strip():
+            return "Hi! I'm Sanchalak, your travel coordinator. Where are you planning to travel?"
 
-        if response["success"]:
-            return response["message"]
-        else:
-            return response["message"]
+        try:
+            # Add to shared state
+            self.state_manager.add_message("user", message, agent="sanchalak")
+            self.state_manager.set_active_agent("sanchalak")
+            self.state_manager.state["orchestrator_active"] = True
+
+            # Add to local history
+            self.conversation_history.append({"role": "user", "content": message})
+
+            # Check if we should route to a specialist
+            routing_intent = self._identify_routing_intent(message)
+
+            if routing_intent:
+                # Route to specialist
+                specialist_response = self._route_to_specialist(routing_intent, message)
+                response = f"Let me check with my {routing_intent} specialist...\n\n{specialist_response}"
+
+                # Update shared state
+                self.state_manager.add_message("assistant", response, agent="sanchalak")
+                self.state_manager.update_agent_response("sanchalak", response)
+                self.state_manager.add_metadata("last_routing", {
+                    "orchestrator": "sanchalak",
+                    "routed_to": routing_intent
+                })
+
+                self.conversation_history.append({"role": "assistant", "content": response})
+                return response
+            else:
+                # Chat naturally without routing
+                claude_response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1024,
+                    system=self.SYSTEM_PROMPT,
+                    messages=self.conversation_history
+                )
+
+                response_text = claude_response.content[0].text
+
+                # Update shared state
+                self.state_manager.add_message("assistant", response_text, agent="sanchalak")
+                self.state_manager.update_agent_response("sanchalak", response_text)
+
+                self.conversation_history.append({"role": "assistant", "content": response_text})
+                return response_text
+
+        except Exception as e:
+            logger.error(f"Route query error: {str(e)}")
+            error_msg = f"I encountered an error: {str(e)}"
+            self.state_manager.add_message("assistant", error_msg, agent="sanchalak")
+            return error_msg
+
+    def chat(self, message: str) -> str:
+        """Chat interface - main entry point.
+
+        Chats naturally with Claude, routing to specialists as needed.
+
+        Args:
+            message: User message
+
+        Returns:
+            Sanchalak's response or routed specialist response
+        """
+        return self.route_query(message)
 
     def get_orchestrator_info(self) -> Dict:
         """Get orchestrator status"""
         return {
             "name": "Sanchalak",
             "role": "Master Orchestrator",
-            "available_agents": list(self.agents.keys()),
-            "last_agent_used": self.last_agent_used,
+            "model": self.model,
+            "available_specialists": list(self.agents.keys()),
+            "last_specialist_used": self.last_agent_used,
             "conversation_turns": len(self.conversation_history),
-            "agents_status": {
+            "specialists_status": {
                 agent_name: agent.get_agent_info()
                 for agent_name, agent in self.agents.items()
             }
+        }
+
+    def get_status(self) -> Dict:
+        """Get trip planning status."""
+        state = self.state_manager.get_state()
+        prefs = state["travel_preferences"]
+
+        return {
+            "active_specialists": state["active_agents"],
+            "destination": prefs["destination"],
+            "dates": f"{prefs['checkin_date']} to {prefs['checkout_date']}",
+            "travelers": f"{prefs['num_adults']} adults, {prefs['num_children']} children",
+            "budget": prefs["budget"],
+            "conversation_turns": len(self.conversation_history),
+            "messages_in_state": len(state["conversation_history"])
         }
 
     def get_shared_preferences(self) -> Dict:
@@ -203,4 +299,4 @@ class SanchalakAgent:
         logger.info("Sanchalak orchestrator reset")
 
     def __repr__(self) -> str:
-        return f"<SanchalakAgent agents={len(self.agents)} last_used={self.last_agent_used} with_shared_state=True>"
+        return f"<SanchalakAgent model='{self.model}' specialists={len(self.agents)} last_used={self.last_agent_used}>"
