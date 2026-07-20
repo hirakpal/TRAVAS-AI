@@ -46,10 +46,23 @@ def _message_triggers_synthesis(text: str) -> bool:
     return False
 
 
+SPECIALIST_KEYS = {"atithi", "annapurna", "yatra", "safar", "bazaar"}
+
+
 def _can_generate_itinerary() -> bool:
-    """Check whether shared state has enough context to synthesize."""
+    """Check whether shared state has enough context to synthesize.
+
+    Requires at least 2 GENUINE specialist responses (not just Sanchalak's
+    own text - agent_responses also stores a "sanchalak" entry for every
+    turn, which meant the old `len(agent_responses) > 0` check was true
+    after the very first message regardless of whether any real specialist
+    had ever been consulted). Requiring 2 also reduces near-empty synthesis
+    attempts like the one Yojana correctly refused (1 specialist had only
+    asked clarifying questions, 0 others had responded).
+    """
     state = get_state_manager().get_state()
-    return bool(state["travel_preferences"].get("destination")) and len(state["agent_responses"]) > 0
+    real_specialist_responses = SPECIALIST_KEYS & set(state["agent_responses"].keys())
+    return bool(state["travel_preferences"].get("destination")) and len(real_specialist_responses) >= 2
 
 
 def _run_validation(itinerary_text: str, prefs: dict) -> str:
