@@ -203,10 +203,37 @@ Be thorough. Be honest. Protect the user experience."""
 
         return self._get_response(updated_messages)
 
-    def validate_itinerary(self, itinerary_json: str, preferences: Dict = None) -> str:
-        """Validate draft itinerary before user review."""
+    def validate_itinerary(
+        self,
+        itinerary_json: str,
+        preferences: Dict = None,
+        deterministic_findings: Optional[Dict] = None,
+    ) -> str:
+        """Validate draft itinerary before user review.
+
+        Args:
+            itinerary_json: The draft itinerary text (prose or JSON).
+            preferences: Known traveler preferences.
+            deterministic_findings: Optional {"issues": [...], "warnings": [...]}
+                already computed by parse_and_validate_itinerary() (real
+                overlap/budget checks on the structured submission, not LLM
+                judgment). When present, Parikshak is told these are already
+                confirmed facts rather than having to re-derive scheduling
+                conflicts from reading prose - which is exactly the kind of
+                check an LLM is unreliable at doing precisely.
+        """
         try:
             self.state_manager.set_active_agent("parikshak")
+
+            deterministic_block = ""
+            if deterministic_findings and (deterministic_findings.get("issues") or deterministic_findings.get("warnings")):
+                issues = deterministic_findings.get("issues") or []
+                warnings = deterministic_findings.get("warnings") or []
+                deterministic_block = "\n\nDETERMINISTIC CHECKS ALREADY RUN (treat these as confirmed facts, not judgment calls):\n"
+                if issues:
+                    deterministic_block += "Confirmed issues:\n" + "\n".join(f"- {i}" for i in issues) + "\n"
+                if warnings:
+                    deterministic_block += "Confirmed warnings:\n" + "\n".join(f"- {w}" for w in warnings) + "\n"
 
             context = f"""
 Please validate this draft itinerary BEFORE it goes to the user.
@@ -216,7 +243,7 @@ ITINERARY:
 
 USER PREFERENCES:
 {json.dumps(preferences or {}, indent=2)}
-
+{deterministic_block}
 Run through ALL 7 validation checks:
 1. Scheduling Conflicts
 2. Duplicate Attractions

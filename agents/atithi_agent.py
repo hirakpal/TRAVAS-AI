@@ -175,6 +175,11 @@ If hotel information is unavailable:
 - Continue with the best available recommendations
 - Never fabricate details
 - Use "Not Known" or "Information not available" where appropriate
+- 🔴 If search_hotels returns zero results for the destination, say PLAINLY that this
+  destination isn't in your current verified hotel dataset and you cannot give verified
+  specifics for it. Do NOT then answer from your own general knowledge and present it as
+  if it were a checked recommendation - that is fabrication even if the facts happen to be
+  roughly correct, because the user has no way to tell it apart from verified data.
 
 RULES - Always:
 - Be honest and transparent
@@ -222,10 +227,19 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         self.tools_used_count = 0
         self.max_tool_calls = 10  # Prevent infinite loops
 
+        # Grounding enforcement: tracks whether search_hotels has EVER
+        # succeeded in this conversation (not reset per-turn, unlike
+        # tools_used_count). Used by compute_force_tool() (base_agent.py) to
+        # force a real tool call if the model keeps skipping it - previously
+        # tool use was entirely "auto", so nothing stopped Claude from
+        # answering from its own general knowledge (e.g. inventing Singapore
+        # hotels, since the mock dataset only covers Delhi/Mumbai/Goa).
+        self.has_ever_searched = False
+
         # Initialize shared state manager
         self.state_manager = get_state_manager()
 
-    def _get_response(self, messages: List[Dict]) -> str:
+    def _get_response(self, messages: List[Dict], force_tool: bool = False) -> str:
         """Get response from Claude with tool use."""
         try:
             response = self.client.messages.create(
@@ -234,6 +248,7 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
                 system=self.system_prompt,
                 messages=messages,
                 tools=[self._format_tool(tool) for tool in HOTEL_TOOLS.values()],
+                tool_choice={"type": "any"} if force_tool else {"type": "auto"},
             )
 
             logger.debug(f"API Response: {response.model_dump_json()}")
@@ -296,6 +311,12 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
                 try:
                     result = tool.execute(**tool_input)
                     self.tools_used_count += 1
+                    if tool_name == "search_hotels":
+                        # A genuine search attempt counts as grounding even if
+                        # it returns zero results (e.g. destination not in the
+                        # mock dataset) - that's a legitimate "not covered"
+                        # answer, not a reason to keep forcing repeat searches.
+                        self.has_ever_searched = True
 
                     logger.info(f"Tool result: {result}")
                     tool_results.append({
@@ -318,7 +339,8 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             {"role": "user", "content": tool_results}
         ]
 
-        # Get follow-up response
+        # Get follow-up response (never force here - forcing only applies to
+        # the first call of a turn; this is already mid tool-use loop)
         return self._get_response(updated_messages)
 
     def chat(self, user_message: str) -> str:
@@ -357,8 +379,10 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             # Format messages for API
             messages = self._format_messages_for_llm()
 
-            # Get response with tool use
-            response = self._get_response(messages)
+            # Get response with tool use - force a real search_hotels call if
+            # we've gone several turns with a known destination and never
+            # actually searched yet (see BaseAgent.compute_force_tool).
+            response = self._get_response(messages, force_tool=self.compute_force_tool())
 
             # Update shared state with response
             self.state_manager.add_message("assistant", response, agent="atithi")
@@ -476,6 +500,7 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         """Reset conversation and state."""
         super().reset()
         self.tools_used_count = 0
+        self.has_ever_searched = False
 
     def __repr__(self) -> str:
         return f"<AtithiAgent model='{self.model}' provider='anthropic' with_shared_state=True>"

@@ -148,6 +148,11 @@ If information unavailable:
 - Continue with best available options
 - Never fabricate details
 - Use "Not Known" or "Information not available"
+- 🔴 If search_shops returns zero results for the destination, say PLAINLY that this
+  destination isn't in your current verified shopping dataset and you cannot give verified
+  specifics for it. Do NOT then answer from your own general knowledge and present it as if
+  it were a checked recommendation - that is fabrication even if roughly correct, because the
+  user has no way to tell it apart from verified data.
 
 RULES - Always:
 - Promote authentic, local products
@@ -188,9 +193,13 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.tools_used_count = 0
         self.max_tool_calls = 10
+
+        # Grounding enforcement - see atithi_agent.py for the full rationale.
+        self.has_ever_searched = False
+
         self.state_manager = get_state_manager()
 
-    def _get_response(self, messages: List[Dict]) -> str:
+    def _get_response(self, messages: List[Dict], force_tool: bool = False) -> str:
         """Get response from Claude with tool use."""
         try:
             response = self.client.messages.create(
@@ -199,6 +208,7 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
                 system=self.system_prompt,
                 messages=messages,
                 tools=[self._format_tool(tool) for tool in SHOPPING_TOOLS.values()],
+                tool_choice={"type": "any"} if force_tool else {"type": "auto"},
             )
             return self._process_response(response, messages)
         except anthropic.APIError as e:
@@ -254,6 +264,8 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
                 try:
                     result = tool.execute(**tool_input)
                     self.tools_used_count += 1
+                    if tool_name in ("search_shops", "search_by_category"):
+                        self.has_ever_searched = True
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -293,7 +305,7 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
             self.tools_used_count = 0
 
             messages = self._format_messages_for_llm()
-            response = self._get_response(messages)
+            response = self._get_response(messages, force_tool=self.compute_force_tool())
 
             self.state_manager.add_message("assistant", response, agent="bazaar")
             self.state_manager.update_agent_response("bazaar", response)
@@ -322,6 +334,7 @@ Help travelers find authentic, meaningful souvenirs while supporting local artis
         """Reset conversation and state."""
         super().reset()
         self.tools_used_count = 0
+        self.has_ever_searched = False
 
     def __repr__(self) -> str:
         return f"<BazaarAgent model='{self.model}' provider='anthropic' with_shared_state=True>"

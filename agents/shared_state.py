@@ -80,6 +80,27 @@ def enrich_message_with_context(user_message: str, prefs: dict) -> str:
     return f"CONTEXT FROM EARLIER CONVERSATION:\n{summary}\n\nUSER REQUEST:\n{user_message}"
 
 
+# Markers that appear in Yojana's own "I can't build a draft yet" refusal
+# text (its correct, designed behavior when specialist input is too thin).
+# Shared between yojana_agent.py (to decide whether to attempt structured
+# submission) and streamlit_app.py (to decide whether the itinerary panel
+# has a real draft) so the two can't drift out of sync on what counts as
+# "real."
+REFUSAL_MARKERS = [
+    "insufficient specialist input",
+    "cannot produce a meaningful draft",
+    "there is no itinerary to validate",
+]
+
+
+def is_real_itinerary(text: str) -> bool:
+    """True if Yojana actually produced a draft, False if it refused."""
+    if not text:
+        return False
+    lower = text.lower()
+    return not any(marker in lower for marker in REFUSAL_MARKERS)
+
+
 class TravelPreferences(TypedDict):
     """Shared travel preferences across all agents"""
     destination: Optional[str]

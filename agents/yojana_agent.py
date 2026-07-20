@@ -6,8 +6,8 @@ from typing import Optional, List, Dict, Any
 import anthropic
 
 from agents.base_agent import BaseAgent
-from agents.shared_state import get_state_manager, format_budget
-from tools.planning_tools import PLANNING_TOOLS
+from agents.shared_state import get_state_manager, format_budget, is_real_itinerary
+from tools.planning_tools import PLANNING_TOOLS, SubmitItineraryTool, parse_and_validate_itinerary
 from models.itinerary import TravelItinerary, DayPlan
 from utils.logger import get_logger
 
@@ -64,6 +64,13 @@ class YojanaAgent(BaseAgent):
         self.max_tool_calls = 15
         self.state_manager = get_state_manager()
         self.current_itinerary: Optional[TravelItinerary] = None
+
+        # Contract-validation state for the most recently created/revised
+        # itinerary - populated by _synthesize_structured_itinerary(). None
+        # until a real (non-refusal) draft has been through it.
+        self.structured_itinerary: Optional[TravelItinerary] = None
+        self.structured_validation_issues: List[str] = []
+        self.structured_validation_warnings: List[str] = []
 
     def chat(self, user_message: str) -> str:
         """Generic chat - not used by Yojana. Use create_itinerary() or revise_itinerary() instead."""
@@ -251,6 +258,8 @@ Present as DRAFT for user review.
             self.state_manager.add_message("assistant", response, agent="yojana")
             self.add_to_history("assistant", response)
 
+            self._synthesize_structured_itinerary(response)
+
             return response
 
         except Exception as e:
@@ -271,11 +280,76 @@ Present as DRAFT for user review.
             self.state_manager.add_message("assistant", response, agent="yojana")
             self.add_to_history("assistant", response)
 
+            self._synthesize_structured_itinerary(response)
+
             return response
 
         except Exception as e:
             logger.error(f"Revise itinerary error: {str(e)}")
             return f"Error revising itinerary: {str(e)}"
+
+    def _synthesize_structured_itinerary(self, draft_text: str) -> None:
+        """Force a second, structured submission of the itinerary Yojana
+        just drafted in prose, closing the contract-validation gap.
+
+        Previously create_itinerary()/revise_itinerary() only ever returned
+        free-form markdown - nothing checked it was internally consistent
+        (valid day numbers, no overlapping activities, within budget).
+        models/itinerary.py already defines a TravelItinerary schema for
+        exactly this, it was just never populated. This makes a second call
+        with tool_choice forced to submit_itinerary, so a structured
+        submission isn't optional - then runs deterministic (not
+        LLM-judgment) validation against it via parse_and_validate_itinerary.
+
+        Skipped entirely if the draft was a refusal (insufficient specialist
+        input) - there's nothing to structure yet.
+        """
+        self.structured_itinerary = None
+        self.structured_validation_issues = []
+        self.structured_validation_warnings = []
+
+        if not is_real_itinerary(draft_text):
+            return
+
+        try:
+            messages = self._format_messages_for_llm()
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Now call submit_itinerary with the complete structured version of the "
+                    "itinerary you just proposed above - every day, every activity, with times, "
+                    "locations, and costs. This is required before the plan can be validated and "
+                    "shown to the user."
+                ),
+            })
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=self.system_prompt,
+                messages=messages,
+                tools=[self._format_tool(SubmitItineraryTool)],
+                tool_choice={"type": "tool", "name": "submit_itinerary"},
+            )
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use" and block.name == "submit_itinerary":
+                    itinerary, issues, warnings = parse_and_validate_itinerary(block.input)
+                    self.structured_itinerary = itinerary
+                    self.structured_validation_issues = issues
+                    self.structured_validation_warnings = warnings
+                    self.current_itinerary = itinerary
+                    self.state_manager.add_metadata("structured_itinerary", {
+                        "itinerary": itinerary,
+                        "issues": issues,
+                        "warnings": warnings,
+                    })
+                    if issues:
+                        logger.warning(f"Contract validation found issues: {issues}")
+                    return
+            logger.warning("Yojana did not return a submit_itinerary tool call")
+            self.structured_validation_issues = ["Yojana did not submit a structured itinerary to validate."]
+        except Exception as e:
+            logger.error(f"Structured itinerary synthesis failed: {str(e)}")
+            self.structured_validation_issues = [f"Could not produce a structured, validated plan: {str(e)}"]
 
     def get_agent_info(self) -> Dict:
         """Get agent information."""
@@ -292,6 +366,9 @@ Present as DRAFT for user review.
         super().reset()
         self.tools_used_count = 0
         self.current_itinerary = None
+        self.structured_itinerary = None
+        self.structured_validation_issues = []
+        self.structured_validation_warnings = []
 
     def __repr__(self) -> str:
         return f"<YojanaAgent model='{self.model}' role='Plan Synthesizer'>"

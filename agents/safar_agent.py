@@ -156,6 +156,11 @@ If information unavailable:
 - Continue with best available options
 - Never fabricate details
 - Use "Not Known" or "Information not available"
+- 🔴 If your transport searches return zero results for the route, say PLAINLY that this
+  route isn't in your current verified transport dataset and you cannot give verified
+  specifics for it. Do NOT then answer from your own general knowledge and present it as if
+  it were a checked recommendation - that is fabrication even if roughly correct, because the
+  user has no way to tell it apart from verified data.
 
 RULES - Always:
 - Be helpful and knowledgeable
@@ -231,10 +236,13 @@ Provide complete journey planning from start to finish."""
         self.tools_used_count = 0
         self.max_tool_calls = 10
 
+        # Grounding enforcement - see atithi_agent.py for the full rationale.
+        self.has_ever_searched = False
+
         # Initialize shared state manager
         self.state_manager = get_state_manager()
 
-    def _get_response(self, messages: List[Dict]) -> str:
+    def _get_response(self, messages: List[Dict], force_tool: bool = False) -> str:
         """Get response from Claude with tool use."""
         try:
             response = self.client.messages.create(
@@ -243,6 +251,7 @@ Provide complete journey planning from start to finish."""
                 system=self.system_prompt,
                 messages=messages,
                 tools=[self._format_tool(tool) for tool in TRANSPORT_TOOLS.values()],
+                tool_choice={"type": "any"} if force_tool else {"type": "auto"},
             )
 
             logger.debug(f"API Response: {response.model_dump_json()}")
@@ -301,6 +310,8 @@ Provide complete journey planning from start to finish."""
                 try:
                     result = tool.execute(**tool_input)
                     self.tools_used_count += 1
+                    if tool_name in ("search_flights", "search_trains", "search_local_transport"):
+                        self.has_ever_searched = True
 
                     logger.info(f"Tool result: {result}")
                     tool_results.append({
@@ -356,7 +367,7 @@ Provide complete journey planning from start to finish."""
 
             # Get response
             messages = self._format_messages_for_llm()
-            response = self._get_response(messages)
+            response = self._get_response(messages, force_tool=self.compute_force_tool())
 
             # Update shared state
             self.state_manager.add_message("assistant", response, agent="safar")
@@ -388,6 +399,7 @@ Provide complete journey planning from start to finish."""
         """Reset conversation and state."""
         super().reset()
         self.tools_used_count = 0
+        self.has_ever_searched = False
 
     def __repr__(self) -> str:
         return f"<SafarAgent model='{self.model}' provider='anthropic' with_shared_state=True>"
