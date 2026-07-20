@@ -355,12 +355,94 @@ class GetTransportDetailsTool:
             }
 
 
+class SemanticSearchTransportTool:
+    """Semantic (meaning-based) search over flights and trains - finds
+    journeys matching a natural-language description (e.g. "cheapest direct
+    option" or "most comfortable overnight journey") rather than only exact
+    filters. Covers flights and trains only, not local transport (a
+    separately-modeled dataset - use search_local_transport for that).
+    """
+
+    name = "semantic_search_transport"
+    description = (
+        "Search flights and trains between two cities by natural-language description "
+        "(e.g. 'most comfortable direct option' or 'cheapest overnight journey'), using "
+        "semantic similarity rather than only exact filters. Both cities are required - "
+        "this tool only searches within TRAVAS's verified dataset for that exact route."
+    )
+
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "departure_city": {"type": "string", "description": "Departure city (required)"},
+            "arrival_city": {"type": "string", "description": "Arrival city (required)"},
+            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
+            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
+        },
+        "required": ["departure_city", "arrival_city", "query"],
+    }
+
+    @staticmethod
+    def execute(departure_city: str, arrival_city: str, query: str, n_results: int = 5) -> Dict[str, Any]:
+        from data.rag_index import semantic_search, get_record_by_id
+
+        dep = departure_city.strip().title()
+        arr = arrival_city.strip().title()
+        route_label = f"{dep} to {arr}"
+
+        # Filter by departure_city via the vector store, then narrow to the
+        # exact arrival_city in Python - avoids depending on chromadb's
+        # compound-filter ($and) operator support across versions.
+        hits = semantic_search(
+            "transport", query, n_results=max(n_results * 3, 10), where={"departure_city": dep}
+        )
+        matched = []
+        for hit in hits:
+            journey = get_record_by_id("transport", hit["id"])
+            if journey is not None and journey.arrival_city == arr:
+                matched.append((journey, hit))
+            if len(matched) >= n_results:
+                break
+
+        if not matched:
+            return {
+                "success": False,
+                "message": (
+                    f"No semantic matches for '{query}' on the {route_label} route. This means "
+                    f"this route is not in TRAVAS's current verified transport dataset - tell the "
+                    f"user plainly that you don't have verified data for it, rather than answering "
+                    f"from general knowledge."
+                ),
+                "results": [],
+            }
+
+        results = [
+            {
+                "id": j.id,
+                "type": j.transport_type.value,
+                "operator": j.operator_name,
+                "departure_time": j.departure_time,
+                "arrival_time": j.arrival_time,
+                "price_per_person": j.price_per_person,
+                "comfort_level": j.comfort_level.value,
+                "why_matched": hit["document"][:200],
+            }
+            for j, hit in matched
+        ]
+        return {
+            "success": True,
+            "message": f"Found {len(results)} semantically relevant result(s) for '{query}' on {route_label}",
+            "results": results,
+        }
+
+
 # Export tools
 TRANSPORT_TOOLS = {
     "search_flights": SearchFlightsTool,
     "search_trains": SearchTrainsTool,
     "search_local_transport": SearchLocalTransportTool,
     "get_transport_details": GetTransportDetailsTool,
+    "semantic_search_transport": SemanticSearchTransportTool,
 }
 
 

@@ -265,11 +265,65 @@ class FilterHotelsTool:
             }
 
 
+class SemanticHotelSearchTool:
+    """Semantic (meaning-based) hotel search - finds hotels matching a
+    natural-language description/vibe rather than only exact field filters.
+
+    Complements search_hotels (exact city + numeric filters); use this when
+    the traveler describes what they want in their own words (e.g. "quiet
+    boutique place near the beach with a pool for a family with kids").
+    """
+
+    name = "semantic_search_hotels"
+    description = (
+        "Search hotels by natural-language description or vibe (e.g. 'romantic boutique "
+        "hotel near the beach with a pool') within a specific city, using semantic "
+        "similarity rather than only exact keyword filters. City is required - this tool "
+        "only searches within TRAVAS's verified dataset for that city."
+    )
+
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City to search within (required)"},
+            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
+            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
+        },
+        "required": ["city", "query"],
+    }
+
+    @staticmethod
+    def execute(city: str, query: str, n_results: int = 5) -> dict:
+        from tools.rag_helpers import run_semantic_search
+
+        def _format(hotel, hit):
+            cheapest = hotel.get_cheapest_room()
+            return {
+                "id": hotel.id,
+                "name": hotel.name,
+                "location": hotel.location,
+                "star_rating": hotel.star_rating,
+                "avg_price": cheapest.price_per_night if cheapest else "N/A",
+                "avg_rating": round(hotel.average_rating, 1),
+                "why_matched": hit["document"][:200],
+            }
+
+        return run_semantic_search(
+            domain="hotels",
+            query=query,
+            where={"city": city.strip().title()},
+            coverage_label=city,
+            n_results=n_results,
+            formatter=_format,
+        )
+
+
 # Tool registry
 HOTEL_TOOLS = {
     "search_hotels": HotelSearchTool(),
     "get_hotel_details": GetHotelDetailsTool(),
     "filter_hotels": FilterHotelsTool(),
+    "semantic_search_hotels": SemanticHotelSearchTool(),
 }
 
 

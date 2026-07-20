@@ -321,12 +321,61 @@ class CompareShopsTool:
             }
 
 
+class SemanticSearchShopsTool:
+    """Semantic (meaning-based) shop search - finds shops matching a
+    natural-language description rather than only exact filters.
+    """
+
+    name = "semantic_search_shops"
+    description = (
+        "Search shops by natural-language description or vibe (e.g. 'authentic local "
+        "handicrafts market where I can bargain') within a specific city, using semantic "
+        "similarity rather than only exact keyword filters. City is required - this tool "
+        "only searches within TRAVAS's verified dataset for that city."
+    )
+
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City to search within (required)"},
+            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
+            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
+        },
+        "required": ["city", "query"],
+    }
+
+    @staticmethod
+    def execute(city: str, query: str, n_results: int = 5) -> Dict[str, Any]:
+        from tools.rag_helpers import run_semantic_search
+
+        def _format(shop, hit):
+            return {
+                "id": shop.id,
+                "name": shop.name,
+                "type": shop.shop_type.value,
+                "locality": shop.locality,
+                "rating": shop.rating,
+                "bargaining_possible": shop.bargaining_possible,
+                "why_matched": hit["document"][:200],
+            }
+
+        return run_semantic_search(
+            domain="shops",
+            query=query,
+            where={"city": city.strip().title()},
+            coverage_label=city,
+            n_results=n_results,
+            formatter=_format,
+        )
+
+
 # Export tools
 SHOPPING_TOOLS = {
     "search_shops": SearchShopsTool,
     "search_by_category": SearchByCategory,
     "get_shop_details": GetShopDetailsTool,
     "compare_shops": CompareShopsTool,
+    "semantic_search_shops": SemanticSearchShopsTool,
 }
 
 

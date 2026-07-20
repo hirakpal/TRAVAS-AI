@@ -289,11 +289,61 @@ class FilterAttractionsTool:
             }
 
 
+class SemanticSearchAttractionsTool:
+    """Semantic (meaning-based) attraction search - finds attractions
+    matching a natural-language description rather than only exact filters.
+    """
+
+    name = "semantic_search_attractions"
+    description = (
+        "Search attractions by natural-language description or vibe (e.g. 'relaxed nature "
+        "walk with great photo spots' or 'adrenaline-pumping water sports') within a "
+        "specific city, using semantic similarity rather than only exact keyword filters. "
+        "City is required - this tool only searches within TRAVAS's verified dataset for "
+        "that city."
+    )
+
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City to search within (required)"},
+            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
+            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
+        },
+        "required": ["city", "query"],
+    }
+
+    @staticmethod
+    def execute(city: str, query: str, n_results: int = 5) -> Dict[str, Any]:
+        from tools.rag_helpers import run_semantic_search
+
+        def _format(attraction, hit):
+            return {
+                "id": attraction.id,
+                "name": attraction.name,
+                "type": attraction.attraction_type.value,
+                "rating": attraction.rating,
+                "entry_fee": attraction.entry_fee,
+                "duration_hours": attraction.duration_hours,
+                "why_matched": hit["document"][:200],
+            }
+
+        return run_semantic_search(
+            domain="attractions",
+            query=query,
+            where={"city": city.strip().title()},
+            coverage_label=city,
+            n_results=n_results,
+            formatter=_format,
+        )
+
+
 # Export tools
 ATTRACTION_TOOLS = {
     "search_attractions": SearchAttractionsTool,
     "get_attraction_details": GetAttractionDetailsTool,
     "filter_attractions": FilterAttractionsTool,
+    "semantic_search_attractions": SemanticSearchAttractionsTool,
 }
 
 

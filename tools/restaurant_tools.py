@@ -253,11 +253,64 @@ class FilterRestaurantsTool:
             }
 
 
+class SemanticSearchRestaurantsTool:
+    """Semantic (meaning-based) restaurant search - finds restaurants
+    matching a natural-language description rather than only exact filters.
+
+    Complements search_restaurants; use this when the traveler describes
+    what they want in their own words (e.g. "romantic seafood dinner with a
+    view" or "cheap authentic street food").
+    """
+
+    name = "semantic_search_restaurants"
+    description = (
+        "Search restaurants by natural-language description or vibe (e.g. 'romantic "
+        "seafood dinner with a view') within a specific city, using semantic similarity "
+        "rather than only exact keyword filters. City is required - this tool only "
+        "searches within TRAVAS's verified dataset for that city."
+    )
+
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City to search within (required)"},
+            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
+            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
+        },
+        "required": ["city", "query"],
+    }
+
+    @staticmethod
+    def execute(city: str, query: str, n_results: int = 5) -> Dict[str, Any]:
+        from tools.rag_helpers import run_semantic_search
+
+        def _format(restaurant, hit):
+            return {
+                "id": restaurant.id,
+                "name": restaurant.name,
+                "locality": restaurant.locality,
+                "cuisines": [c.value for c in restaurant.cuisine_types],
+                "rating": restaurant.rating,
+                "avg_cost_per_person": restaurant.avg_cost_per_person,
+                "why_matched": hit["document"][:200],
+            }
+
+        return run_semantic_search(
+            domain="restaurants",
+            query=query,
+            where={"city": city.strip().title()},
+            coverage_label=city,
+            n_results=n_results,
+            formatter=_format,
+        )
+
+
 # Export tools
 RESTAURANT_TOOLS = {
     "search_restaurants": SearchRestaurantsTool,
     "get_restaurant_details": GetRestaurantDetailsTool,
     "filter_restaurants": FilterRestaurantsTool,
+    "semantic_search_restaurants": SemanticSearchRestaurantsTool,
 }
 
 
