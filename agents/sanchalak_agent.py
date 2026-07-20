@@ -144,7 +144,7 @@ For general questions, chat naturally without routing."""
         return None
 
     def _route_to_specialist(self, agent_name: str, message: str) -> str:
-        """Route message to specialist agent.
+        """Route message to specialist agent with full context.
 
         Args:
             agent_name: Name of specialist agent
@@ -160,7 +160,37 @@ For general questions, chat naturally without routing."""
         self.last_agent_used = agent_name
 
         try:
-            response = agent.chat(message)
+            # Enrich message with shared state context
+            state = self.state_manager.get_state()
+            prefs = state["travel_preferences"]
+
+            context_info = []
+            if prefs.get("destination"):
+                context_info.append(f"Destination: {prefs['destination']}")
+            if prefs.get("checkin_date"):
+                context_info.append(f"Check-in: {prefs['checkin_date']}")
+            if prefs.get("checkout_date"):
+                context_info.append(f"Check-out: {prefs['checkout_date']}")
+            if prefs.get("num_adults") or prefs.get("num_children"):
+                adults = prefs.get("num_adults", 0)
+                children = prefs.get("num_children", 0)
+                context_info.append(f"Travelers: {adults} adults, {children} children")
+            if prefs.get("budget"):
+                context_info.append(f"Budget: {prefs['budget']}")
+            if prefs.get("accommodation_area"):
+                context_info.append(f"Accommodation area: {prefs['accommodation_area']}")
+
+            enriched_message = message
+            if context_info:
+                enriched_message = f"""
+CONTEXT FROM EARLIER CONVERSATION:
+{' | '.join(context_info)}
+
+USER REQUEST:
+{message}
+"""
+
+            response = agent.chat(enriched_message)
             logger.info(f"Specialist {agent_name} responded")
             return response
         except Exception as e:

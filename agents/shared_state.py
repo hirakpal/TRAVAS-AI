@@ -8,6 +8,7 @@ import json
 class TravelPreferences(TypedDict):
     """Shared travel preferences across all agents"""
     destination: Optional[str]
+    accommodation_area: Optional[str]  # Area/neighborhood for accommodation (e.g., Candolim, Anjuna)
     checkin_date: Optional[str]
     checkout_date: Optional[str]
     num_adults: Optional[int]
@@ -73,6 +74,7 @@ class StateManager:
             conversation_history=[],
             travel_preferences=TravelPreferences(
                 destination=None,
+                accommodation_area=None,
                 checkin_date=None,
                 checkout_date=None,
                 num_adults=None,
