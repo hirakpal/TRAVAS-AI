@@ -163,7 +163,6 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             max_history=max_history
         )
         self.model = model
-        self.temperature = temperature
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.tools_used_count = 0
         self.max_tool_calls = 10  # Prevent infinite loops
