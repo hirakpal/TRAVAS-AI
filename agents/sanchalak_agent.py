@@ -2,11 +2,12 @@
 
 Sanchalak (संचालक) means "Conductor/Orchestrator" in Hindi.
 Routes travel queries to appropriate specialist agents using shared state.
+Uses AgentRegistry factory pattern for agent instantiation.
 """
 
 import os
 from typing import Optional, Dict, List
-from agents.atithi_agent import AtithiAgent
+from agents.registry import AgentRegistry
 from agents.shared_state import get_state_manager
 from utils.logger import get_logger
 
@@ -18,22 +19,21 @@ class SanchalakAgent:
 
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize Sanchalak with available agents and shared state
+        Initialize Sanchalak with available agents from registry and shared state
 
         Args:
             api_key: Anthropic API key
         """
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
 
-        # Initialize available agents
-        self.agents = {
-            "atithi": AtithiAgent(api_key=self.api_key),
-            # Future agents will be added here
-            # "annapurna": AnnapurnaAgent(api_key=self.api_key),
-            # "yatra": YatraAgent(api_key=self.api_key),
-            # "safar": SafarAgent(api_key=self.api_key),
-            # "bazaar": BazaarAgent(api_key=self.api_key),
-        }
+        # Initialize available agents from registry
+        self.agents = {}
+        for agent_name in AgentRegistry.list_agents():
+            try:
+                self.agents[agent_name] = AgentRegistry.get(agent_name, api_key=self.api_key)
+                logger.info(f"✅ Loaded agent: {agent_name}")
+            except Exception as e:
+                logger.error(f"❌ Failed to load agent '{agent_name}': {str(e)}")
 
         # Track which agent was used
         self.last_agent_used = None

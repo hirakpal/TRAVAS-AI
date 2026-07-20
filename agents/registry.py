@@ -1,12 +1,19 @@
-from typing import Dict, Optional
+"""Agent Registry - Factory for creating and managing agents"""
+
+from typing import Dict, Optional, Type
 from agents.atithi_agent import AtithiAgent
 
 
 class AgentRegistry:
-    """Registry for all available agents"""
+    """Registry for all available agents - Singleton factory pattern"""
 
-    _agents: Dict[str, type] = {
+    _agents: Dict[str, Type] = {
         "atithi": AtithiAgent,
+        # Future agents will be registered here:
+        # "annapurna": AnnapurnaAgent,
+        # "yatra": YatraAgent,
+        # "safar": SafarAgent,
+        # "bazaar": BazaarAgent,
     }
 
     @classmethod
