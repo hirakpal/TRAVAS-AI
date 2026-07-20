@@ -4,6 +4,8 @@ from typing import Dict, Optional, Type
 from agents.atithi_agent import AtithiAgent
 from agents.annapurna_agent import AnnapurnaAgent
 from agents.yatra_agent import YatraAgent
+from agents.safar_agent import SafarAgent
+from agents.bazaar_agent import BazaarAgent
 
 
 class AgentRegistry:
@@ -13,9 +15,8 @@ class AgentRegistry:
         "atithi": AtithiAgent,
         "annapurna": AnnapurnaAgent,
         "yatra": YatraAgent,
-        # Future agents will be registered here:
-        # "safar": SafarAgent,
-        # "bazaar": BazaarAgent,
+        "safar": SafarAgent,
+        "bazaar": BazaarAgent,
     }
 
     @classmethod
