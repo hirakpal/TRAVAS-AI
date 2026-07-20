@@ -1,7 +1,7 @@
 """Atithi Agent - Hotel recommendation specialist.
 
 The Atithi (guest) agent provides personalized hotel recommendations
-with warmth and cultural awareness.
+with warmth and cultural awareness. Uses shared state for multi-agent coordination.
 """
 
 import json
@@ -11,6 +11,7 @@ from datetime import datetime
 import anthropic
 
 from agents.base_agent import BaseAgent, Message
+from agents.shared_state import get_state_manager
 from tools.hotel_tools import HOTEL_TOOLS, list_tools
 from models.preferences import TravelPreferences
 from utils.logger import get_logger
@@ -31,11 +32,43 @@ Your role is to act like an experienced hotel concierge—not a booking engine o
 PRIMARY OBJECTIVE
 Help travelers choose the best hotel for their trip by understanding their needs and recommending hotels that best match those requirements.
 
+CRITICAL: THREE-PHASE CONVERSATION FLOW
+You MUST follow this exact sequence and NEVER skip or rush phases:
+
+PHASE 1: COLLECT ESSENTIAL DATES & TRAVELERS (REQUIRED - DO NOT SEARCH YET)
+You MUST gather these before any hotel search:
+- Destination city
+- Check-in date
+- Check-out date
+- Number of adults
+- Number of children (if any)
+- Number of rooms needed
+
+Ask these questions naturally across 1-3 turns. Do NOT call search_hotels until you have ALL of Phase 1.
+
+PHASE 2: COLLECT PREFERENCES & BUDGET (REQUIRED - STILL NO SEARCH)
+After Phase 1, ask for:
+- Budget per night (or Budget tier: Budget/Mid-range/Premium/Luxury)
+- Room preferences
+- Must-have amenities
+- Accessibility needs
+- Any other specific requirements
+
+Ask these across 1-2 turns. Do NOT call search_hotels until Phase 1 + Phase 2 complete.
+
+PHASE 3: SEARCH & RECOMMEND (NOW USE TOOLS)
+Only after Phases 1 & 2 are complete:
+- Call search_hotels with gathered information
+- Filter by preferences
+- Get hotel details
+- Provide 2-3 recommendations with clear reasoning
+
 You must NOT:
 - Make hotel bookings
 - Process payments
 - Ask users to complete reservations
 - Invent hotel information, amenities, policies, or reviews
+- Call any search tools before completing Phases 1 & 2
 
 Always explain why a recommendation is suitable.
 
@@ -48,6 +81,12 @@ Be:
 - Conversational
 
 Avoid sounding like a booking website. Guide the traveler naturally. Never overwhelm users with long questionnaires. Ask only for information that is still missing.
+
+IMPORTANT CONVERSATION RULES:
+- Phase 1 (Dates & Travelers): Ask 2-3 questions per turn. Acknowledge what you learned. Keep asking naturally until you have all Phase 1 info.
+- Phase 2 (Preferences & Budget): Once Phase 1 complete, ask about budget and preferences. Do NOT mention searching yet.
+- Phase 3 (Search): Only after both phases, say "Let me search for options" and use tools.
+- Do NOT apologize for gathering information - it's necessary and professional.
 
 UNDERSTANDING THE TRAVELER
 Collect information progressively through natural conversation.
@@ -145,9 +184,9 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         api_key: Optional[str] = None,
         model: str = "claude-opus-4-8",
         max_history: int = 20,
-        
+
     ):
-        """Initialize Atithi Agent.
+        """Initialize Atithi Agent with shared state.
 
         Args:
             api_key: Anthropic API key (defaults to env var)
@@ -166,6 +205,9 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.tools_used_count = 0
         self.max_tool_calls = 10  # Prevent infinite loops
+
+        # Initialize shared state manager
+        self.state_manager = get_state_manager()
 
     def _get_response(self, messages: List[Dict]) -> str:
         """Get response from Claude with tool use."""
@@ -266,6 +308,8 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
     def chat(self, user_message: str) -> str:
         """Send a message and get response with tool use.
 
+        Integrates with shared state for multi-agent coordination.
+
         Args:
             user_message: User's message
 
@@ -277,7 +321,13 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             return "I need your message to help you find a hotel. What are you looking for?"
 
         try:
-            # Add to history
+            # Add to shared state history
+            self.state_manager.add_message("user", user_message, agent="atithi")
+
+            # Mark this agent as active
+            self.state_manager.set_active_agent("atithi")
+
+            # Add to local history
             self.add_to_history("user", user_message)
 
             # Reset tool call counter for each new message
@@ -289,7 +339,11 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             # Get response with tool use
             response = self._get_response(messages)
 
-            # Add to history
+            # Update shared state with response
+            self.state_manager.add_message("assistant", response, agent="atithi")
+            self.state_manager.update_agent_response("atithi", response)
+
+            # Add to local history
             self.add_to_history("assistant", response)
 
             return response
@@ -297,11 +351,14 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         except Exception as e:
             logger.error(f"Chat error: {str(e)}")
             error_msg = f"I encountered an error: {str(e)}"
+            self.state_manager.add_message("assistant", error_msg, agent="atithi")
             self.add_to_history("assistant", error_msg)
             return error_msg
 
     def chat_stream(self, user_message: str) -> Generator[str, None, None]:
         """Send message and stream response.
+
+        Integrates with shared state for multi-agent coordination.
 
         Args:
             user_message: User's message
@@ -314,6 +371,10 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
             return
 
         try:
+            # Add to shared state history
+            self.state_manager.add_message("user", user_message, agent="atithi")
+            self.state_manager.set_active_agent("atithi")
+
             self.add_to_history("user", user_message)
             self.tools_used_count = 0
             messages = self._format_messages_for_llm()
@@ -340,11 +401,16 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
                 yield f"\n\n{response}"
                 full_response += response
 
+            # Update shared state with response
+            self.state_manager.add_message("assistant", full_response, agent="atithi")
+            self.state_manager.update_agent_response("atithi", full_response)
+
             self.add_to_history("assistant", full_response)
 
         except Exception as e:
             logger.error(f"Stream error: {str(e)}")
             error_msg = f"Stream error: {str(e)}"
+            self.state_manager.add_message("assistant", error_msg, agent="atithi")
             yield error_msg
             self.add_to_history("assistant", error_msg)
 
@@ -353,10 +419,38 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         info = super().get_agent_info()
         info.update({
             "model": self.model,
+            "temperature": self.temperature,
             "available_tools": len(HOTEL_TOOLS),
             "tools": [t.name for t in HOTEL_TOOLS.values()]
         })
         return info
+
+    def get_shared_preferences(self) -> Dict:
+        """Get current travel preferences from shared state."""
+        return dict(self.state_manager.get_preferences())
+
+    def update_shared_preferences(self, **kwargs) -> None:
+        """Update shared travel preferences.
+
+        Args:
+            **kwargs: Preference updates (destination, budget, etc.)
+        """
+        self.state_manager.update_preferences(kwargs)
+        logger.info(f"Updated shared preferences: {kwargs}")
+
+    def update_hotel_recommendations(self, hotels: List[Dict]) -> None:
+        """Store hotel recommendations in shared state.
+
+        Args:
+            hotels: List of hotel recommendation dicts
+        """
+        self.state_manager.update_recommendations("atithi", hotels)
+        logger.info(f"Stored {len(hotels)} hotel recommendations in shared state")
+
+    def get_other_agent_responses(self) -> Dict[str, str]:
+        """Get responses from other agents."""
+        context = self.state_manager.get_agent_context("atithi")
+        return context.get("other_agent_responses", {})
 
     def reset(self) -> None:
         """Reset conversation and state."""
@@ -364,4 +458,4 @@ Provide thoughtful, personalized hotel recommendations that help travelers confi
         self.tools_used_count = 0
 
     def __repr__(self) -> str:
-        return f"<AtithiAgent model='{self.model}' provider='anthropic'>"
+        return f"<AtithiAgent model='{self.model}' provider='anthropic' with_shared_state=True>"
