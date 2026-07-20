@@ -158,39 +158,26 @@ class BaseAgent(ABC):
         return bool(prefs.get("destination"))
 
     def _coverage_directive(self, domain: str) -> Optional[str]:
-        """If the known destination isn't in this domain's verified dataset,
-        return a directive to append to the user message so the specialist leads
-        with that honestly and does NOT cite general-knowledge specifics.
+        """Live-data availability pre-check.
 
-        Why: the "say so if it's not covered" behavior otherwise fires only
-        AFTER a specialist searches and gets zero results, and depends on each
-        specialist's prompt volunteering it - which is inconsistent (e.g. one
-        specialist happily discussed an out-of-dataset destination's food from
-        general knowledge and only would have discovered the gap after
-        gathering). This makes the check deterministic and identical across all
-        specialists, and fires up front. Returns None when covered / destination
-        unknown / on any error (so it never blocks a normal turn).
+        With specialists now grounded on live Google Places (any destination is
+        coverable), the honesty risk is no longer "city not in our mock DB" but
+        "the live source can't be reached" - most commonly a missing API key. If
+        no key is configured, inject an up-front directive so the specialist says
+        so plainly instead of quietly answering from general knowledge. When the
+        key IS present, return None and let the actual search result (and its
+        success/empty/error message) drive honesty. Returns None on any error so
+        it never blocks a normal turn.
         """
-        state_manager = getattr(self, "state_manager", None)
-        if state_manager is None:
-            return None
         try:
-            dest = (state_manager.get_preferences().get("destination") or "").strip()
-            if not dest:
+            from data import live_places
+            if live_places.is_configured():
                 return None
-            from data.rag_index import get_covered_cities
-            covered = get_covered_cities(domain)
-            if not covered or dest.title() in covered:
-                return None
-            covered_list = ", ".join(sorted(covered))
             return (
-                f"\n\n[COVERAGE NOTICE - {dest} is NOT in your verified {domain} dataset "
-                f"(you have verified data only for: {covered_list}). Lead your reply by "
-                f"telling the traveler plainly that you cannot give verified {domain} "
-                f"recommendations for {dest}. Do NOT keep gathering preferences as if you "
-                f"can deliver, and do NOT name any specific {domain} places, dishes, prices, "
-                f"or details for {dest} from general knowledge - that is exactly the "
-                f"fabrication to avoid. Briefly offer the destinations you DO cover instead.]"
+                f"\n\n[LIVE DATA UNAVAILABLE - no Google Places API key is configured, so you "
+                f"cannot fetch verified {domain} data right now. Tell the traveler plainly that "
+                f"you can't pull verified {domain} results at the moment; do NOT answer from "
+                f"general knowledge as if it were verified.]"
             )
         except Exception as e:
             logger.debug(f"_coverage_directive({domain}) error: {str(e)}")
