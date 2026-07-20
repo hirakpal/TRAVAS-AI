@@ -1,352 +1,62 @@
-"""Attraction tools for Yatra Tours Agent"""
+"""Attraction tools for Yatra - now backed by LIVE Google Places (New) + RAG.
+
+Replaces the old mock-attraction dataset (Goa only). Tool names unchanged so the
+agent prompt and has_ever_searched trigger keep working.
+"""
 
 from typing import List, Dict, Any
-from data.mock_attractions import search_attractions, get_attraction_by_id
+
+from data import live_rag, live_places
 
 
 class SearchAttractionsTool:
-    """Search for attractions by city and filters"""
-
     name = "search_attractions"
-    description = "Search for attractions in a city with optional filters like type, difficulty level, and rating"
-
+    description = (
+        "Search for real tourist attractions / things to do in a destination via Google "
+        "Places. Pass the destination and (optionally) the traveler's interests as free "
+        "text (nature, history, adventure, family, etc.) - results are grounded in live "
+        "verified data and ranked to match."
+    )
     input_schema = {
         "type": "object",
         "properties": {
-            "city": {
+            "city": {"type": "string", "description": "Destination city/place (required)"},
+            "query": {
                 "type": "string",
-                "description": "City to search in (e.g., 'Goa', 'Mumbai', 'Delhi')"
+                "description": "Interests as free text, e.g. 'family-friendly, gardens and viewpoints'. Optional.",
             },
-            "attraction_type": {
-                "type": "string",
-                "description": "Type of attraction: 'Beach', 'Temple', 'Fort', 'Museum', 'Water Sports', 'Adventure', 'Nature', 'Market', 'Viewpoint', 'Wildlife'"
-            },
-            "difficulty_level": {
-                "type": "string",
-                "description": "Difficulty: 'Easy', 'Moderate', 'Challenging', 'Extreme'"
-            },
-            "min_rating": {
-                "type": "number",
-                "description": "Minimum rating to filter (1-5)"
-            },
-            "kid_friendly": {
-                "type": "boolean",
-                "description": "Must be kid friendly"
-            }
         },
-        "required": ["city"]
+        "required": ["city"],
     }
 
     @staticmethod
-    def execute(
-        city: str,
-        attraction_type: str = None,
-        difficulty_level: str = None,
-        min_rating: float = 0,
-        kid_friendly: bool = False
-    ) -> Dict[str, Any]:
-        """Execute attraction search"""
-        try:
-            attractions = search_attractions(city, attraction_type, difficulty_level, min_rating)
-
-            # Filter by kid friendly if requested
-            if kid_friendly:
-                attractions = [a for a in attractions if a.kid_friendly]
-
-            if not attractions:
-                return {
-                    "success": False,
-                    "message": f"No attractions found in {city} matching your criteria"
-                }
-
-            results = []
-            for attraction in attractions[:6]:  # Top 6 results
-                results.append({
-                    "id": attraction.id,
-                    "name": attraction.name,
-                    "type": attraction.attraction_type.value,
-                    "rating": attraction.rating,
-                    "num_reviews": attraction.num_reviews,
-                    "description": attraction.description[:100],
-                    "entry_fee": attraction.entry_fee,
-                    "distance_km": attraction.distance_from_city_center,
-                    "duration_hours": attraction.duration_hours,
-                    "difficulty": attraction.difficulty_level.value,
-                    "kid_friendly": attraction.kid_friendly,
-                    "best_time": attraction.best_time_to_visit,
-                })
-
-            return {
-                "success": True,
-                "count": len(results),
-                "attractions": results
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+    def execute(city: str, query: str = "", **_) -> Dict[str, Any]:
+        result = live_rag.search("attractions", city, need=query or "")
+        return {**result, "attractions": result.get("results", [])}
 
 
 class GetAttractionDetailsTool:
-    """Get detailed information about a specific attraction"""
-
     name = "get_attraction_details"
-    description = "Get detailed information about an attraction including hours, amenities, activities, reviews, and best times to visit"
-
+    description = "Get full details (hours, contact, reviews, rating) for one attraction by its Google Places id."
     input_schema = {
         "type": "object",
-        "properties": {
-            "attraction_id": {
-                "type": "string",
-                "description": "Attraction ID to get details for"
-            }
-        },
-        "required": ["attraction_id"]
+        "properties": {"place_id": {"type": "string", "description": "Google Places id from a prior search result"}},
+        "required": ["place_id"],
     }
 
     @staticmethod
-    def execute(attraction_id: str) -> Dict[str, Any]:
-        """Execute get details"""
-        try:
-            attraction = get_attraction_by_id(attraction_id)
-
-            if not attraction:
-                return {
-                    "success": False,
-                    "message": f"Attraction with ID {attraction_id} not found"
-                }
-
-            return {
-                "success": True,
-                "attraction": {
-                    "id": attraction.id,
-                    "name": attraction.name,
-                    "type": attraction.attraction_type.value,
-                    "description": attraction.description,
-                    "locality": attraction.locality,
-                    "address": attraction.address,
-                    "rating": attraction.rating,
-                    "num_reviews": attraction.num_reviews,
-                    "entry_fee": attraction.entry_fee,
-                    "hours": f"{attraction.opening_time} - {attraction.closing_time}",
-                    "duration_hours": attraction.duration_hours,
-                    "distance_from_city_center_km": attraction.distance_from_city_center,
-                    "difficulty": attraction.difficulty_level.value,
-                    "suitable_for": {
-                        "kids": attraction.kid_friendly,
-                        "seniors": attraction.senior_friendly,
-                        "wheelchair": attraction.wheelchair_accessible,
-                    },
-                    "crowd_level": attraction.typical_crowd_level.value,
-                    "crowd_by_time": attraction.crowd_by_time,
-                    "best_time_to_visit": attraction.best_time_to_visit,
-                    "peak_season": attraction.peak_season,
-                    "best_days": attraction.best_days,
-                    "activities": attraction.activities_available,
-                    "highlights": attraction.highlights,
-                    "amenities": [a.name for a in attraction.amenities if a.available],
-                    "phone": attraction.phone,
-                    "website": attraction.website,
-                    "reviews_sample": [
-                        {
-                            "reviewer": r.reviewer_name,
-                            "rating": r.rating,
-                            "comment": r.comment,
-                            "date": r.date
-                        }
-                        for r in attraction.reviews[:2]
-                    ]
-                }
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+    def execute(place_id: str, **_) -> Dict[str, Any]:
+        res = live_places.place_details(place_id)
+        if not res.get("ok"):
+            return {"success": False, "message": res.get("reason", "not found")}
+        return {"success": True, "attraction": res.get("place")}
 
 
-class FilterAttractionsTool:
-    """Filter attractions by specific criteria"""
-
-    name = "filter_attractions"
-    description = "Filter attractions by specific requirements like family-friendly, wheelchair access, difficulty level, and crowd levels"
-
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "city": {
-                "type": "string",
-                "description": "City to search in"
-            },
-            "kid_friendly": {
-                "type": "boolean",
-                "description": "Must be kid friendly"
-            },
-            "senior_friendly": {
-                "type": "boolean",
-                "description": "Must be senior friendly"
-            },
-            "wheelchair_accessible": {
-                "type": "boolean",
-                "description": "Must be wheelchair accessible"
-            },
-            "difficulty_level": {
-                "type": "string",
-                "description": "Difficulty level filter"
-            },
-            "max_duration_hours": {
-                "type": "number",
-                "description": "Maximum duration in hours"
-            },
-            "max_entry_fee": {
-                "type": "number",
-                "description": "Maximum entry fee in INR"
-            }
-        },
-        "required": ["city"]
-    }
-
-    @staticmethod
-    def execute(
-        city: str,
-        kid_friendly: bool = False,
-        senior_friendly: bool = False,
-        wheelchair_accessible: bool = False,
-        difficulty_level: str = None,
-        max_duration_hours: float = None,
-        max_entry_fee: float = None
-    ) -> Dict[str, Any]:
-        """Execute filter attractions"""
-        try:
-            from data.mock_attractions import get_attractions_by_city
-            attractions = get_attractions_by_city(city)
-
-            # Filter by kid friendly
-            if kid_friendly:
-                attractions = [a for a in attractions if a.kid_friendly]
-
-            # Filter by senior friendly
-            if senior_friendly:
-                attractions = [a for a in attractions if a.senior_friendly]
-
-            # Filter by wheelchair accessible
-            if wheelchair_accessible:
-                attractions = [a for a in attractions if a.wheelchair_accessible]
-
-            # Filter by difficulty
-            if difficulty_level:
-                diff_lower = difficulty_level.lower()
-                attractions = [
-                    a for a in attractions
-                    if a.difficulty_level.value.lower() == diff_lower
-                ]
-
-            # Filter by duration
-            if max_duration_hours:
-                attractions = [a for a in attractions if a.duration_hours <= max_duration_hours]
-
-            # Filter by entry fee
-            if max_entry_fee:
-                attractions = [a for a in attractions if a.entry_fee <= max_entry_fee]
-
-            if not attractions:
-                return {
-                    "success": False,
-                    "message": f"No attractions found in {city} matching all criteria"
-                }
-
-            results = []
-            for attraction in attractions[:6]:
-                results.append({
-                    "id": attraction.id,
-                    "name": attraction.name,
-                    "type": attraction.attraction_type.value,
-                    "rating": attraction.rating,
-                    "entry_fee": attraction.entry_fee,
-                    "duration_hours": attraction.duration_hours,
-                    "difficulty": attraction.difficulty_level.value,
-                    "suitable_for": {
-                        "kids": attraction.kid_friendly,
-                        "seniors": attraction.senior_friendly,
-                        "wheelchair": attraction.wheelchair_accessible,
-                    },
-                    "best_time": attraction.best_time_to_visit,
-                })
-
-            return {
-                "success": True,
-                "count": len(results),
-                "attractions": results
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-
-
-class SemanticSearchAttractionsTool:
-    """Semantic (meaning-based) attraction search - finds attractions
-    matching a natural-language description rather than only exact filters.
-    """
-
-    name = "semantic_search_attractions"
-    description = (
-        "Search attractions by natural-language description or vibe (e.g. 'relaxed nature "
-        "walk with great photo spots' or 'adrenaline-pumping water sports') within a "
-        "specific city, using semantic similarity rather than only exact keyword filters. "
-        "City is required - this tool only searches within TRAVAS's verified dataset for "
-        "that city."
-    )
-
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "city": {"type": "string", "description": "City to search within (required)"},
-            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
-            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
-        },
-        "required": ["city", "query"],
-    }
-
-    @staticmethod
-    def execute(city: str, query: str, n_results: int = 5) -> Dict[str, Any]:
-        from tools.rag_helpers import run_semantic_search
-
-        def _format(attraction, hit):
-            return {
-                "id": attraction.id,
-                "name": attraction.name,
-                "type": attraction.attraction_type.value,
-                "rating": attraction.rating,
-                "entry_fee": attraction.entry_fee,
-                "duration_hours": attraction.duration_hours,
-                "why_matched": hit["document"][:200],
-            }
-
-        return run_semantic_search(
-            domain="attractions",
-            query=query,
-            where={"city": city.strip().title()},
-            coverage_label=city,
-            n_results=n_results,
-            formatter=_format,
-        )
-
-
-# Export tools
 ATTRACTION_TOOLS = {
     "search_attractions": SearchAttractionsTool,
     "get_attraction_details": GetAttractionDetailsTool,
-    "filter_attractions": FilterAttractionsTool,
-    "semantic_search_attractions": SemanticSearchAttractionsTool,
 }
 
 
 def list_tools() -> List[str]:
-    """List available tools"""
     return list(ATTRACTION_TOOLS.keys())

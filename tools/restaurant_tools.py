@@ -1,319 +1,62 @@
-"""Restaurant tools for Annapurna Food Agent"""
+"""Restaurant tools for Annapurna - now backed by LIVE Google Places (New) + RAG.
+
+Replaces the old mock-restaurant dataset (which only covered Goa). Tool names are
+unchanged so the agent prompt and has_ever_searched trigger keep working.
+"""
 
 from typing import List, Dict, Any
-from data.mock_restaurants import search_restaurants, get_restaurant_by_id
+
+from data import live_rag, live_places
 
 
 class SearchRestaurantsTool:
-    """Search for restaurants by city and filters"""
-
     name = "search_restaurants"
-    description = "Search for restaurants in a city with optional filters like cuisine, price range, and dietary preferences"
-
+    description = (
+        "Search for real restaurants in a destination via Google Places. Pass the "
+        "destination and (optionally) the traveler's food preferences as free text "
+        "(cuisine, dietary needs, vibe, budget) - results are grounded in live verified "
+        "data and ranked to match."
+    )
     input_schema = {
         "type": "object",
         "properties": {
-            "city": {
+            "city": {"type": "string", "description": "Destination city/place (required)"},
+            "query": {
                 "type": "string",
-                "description": "City to search in (e.g., 'Goa', 'Mumbai', 'Delhi')"
+                "description": "Food preferences as free text, e.g. 'vegetarian local seafood, mid-range'. Optional.",
             },
-            "cuisine": {
-                "type": "string",
-                "description": "Cuisine type to filter by (e.g., 'Indian', 'Seafood', 'Vegetarian', 'Italian')"
-            },
-            "price_range": {
-                "type": "string",
-                "description": "Price range: 'Budget', 'Mid-range', 'Premium', or 'Luxury'"
-            },
-            "min_rating": {
-                "type": "number",
-                "description": "Minimum rating to filter (1-5)"
-            }
         },
-        "required": ["city"]
+        "required": ["city"],
     }
 
     @staticmethod
-    def execute(
-        city: str,
-        cuisine: str = None,
-        price_range: str = None,
-        min_rating: float = 0
-    ) -> Dict[str, Any]:
-        """Execute restaurant search"""
-        try:
-            restaurants = search_restaurants(city, cuisine, price_range)
-
-            # Filter by rating
-            if min_rating > 0:
-                restaurants = [r for r in restaurants if r.rating >= min_rating]
-
-            if not restaurants:
-                return {
-                    "success": False,
-                    "message": f"No restaurants found in {city} matching your criteria"
-                }
-
-            results = []
-            for restaurant in restaurants[:5]:  # Top 5 results
-                results.append({
-                    "id": restaurant.id,
-                    "name": restaurant.name,
-                    "locality": restaurant.locality,
-                    "cuisines": [c.value for c in restaurant.cuisine_types],
-                    "rating": restaurant.rating,
-                    "num_reviews": restaurant.num_reviews,
-                    "avg_cost_per_person": restaurant.avg_cost_per_person,
-                    "price_range": restaurant.price_range,
-                    "distance_km": restaurant.distance_from_city_center,
-                })
-
-            return {
-                "success": True,
-                "count": len(results),
-                "restaurants": results
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+    def execute(city: str, query: str = "", **_) -> Dict[str, Any]:
+        result = live_rag.search("restaurants", city, need=query or "")
+        return {**result, "restaurants": result.get("results", [])}
 
 
 class GetRestaurantDetailsTool:
-    """Get detailed information about a specific restaurant"""
-
     name = "get_restaurant_details"
-    description = "Get detailed information about a restaurant including amenities, reviews, special dishes, and dietary options"
-
+    description = "Get full details (hours, contact, reviews, rating) for one restaurant by its Google Places id."
     input_schema = {
         "type": "object",
-        "properties": {
-            "restaurant_id": {
-                "type": "string",
-                "description": "Restaurant ID to get details for"
-            }
-        },
-        "required": ["restaurant_id"]
+        "properties": {"place_id": {"type": "string", "description": "Google Places id from a prior search result"}},
+        "required": ["place_id"],
     }
 
     @staticmethod
-    def execute(restaurant_id: str) -> Dict[str, Any]:
-        """Execute get details"""
-        try:
-            restaurant = get_restaurant_by_id(restaurant_id)
-
-            if not restaurant:
-                return {
-                    "success": False,
-                    "message": f"Restaurant with ID {restaurant_id} not found"
-                }
-
-            return {
-                "success": True,
-                "restaurant": {
-                    "id": restaurant.id,
-                    "name": restaurant.name,
-                    "address": restaurant.address,
-                    "phone": restaurant.phone,
-                    "website": restaurant.website,
-                    "hours": f"{restaurant.opening_time} - {restaurant.closing_time}",
-                    "type": restaurant.restaurant_type.value,
-                    "cuisines": [c.value for c in restaurant.cuisine_types],
-                    "rating": restaurant.rating,
-                    "num_reviews": restaurant.num_reviews,
-                    "avg_cost_per_person": restaurant.avg_cost_per_person,
-                    "price_range": restaurant.price_range,
-                    "dietary_options": restaurant.dietary_options,
-                    "special_dishes": restaurant.special_dishes,
-                    "amenities": [a.name.value for a in restaurant.amenities if a.available],
-                    "family_friendly": restaurant.is_family_friendly(),
-                    "wheelchair_accessible": restaurant.is_accessible(),
-                    "has_delivery": restaurant.has_delivery(),
-                    "distance_from_city_center_km": restaurant.distance_from_city_center,
-                    "busy_hours": restaurant.busy_hours,
-                    "reviews_sample": [
-                        {
-                            "reviewer": r.reviewer_name,
-                            "rating": r.rating,
-                            "comment": r.comment,
-                            "date": r.date
-                        }
-                        for r in restaurant.reviews[:2]
-                    ]
-                }
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+    def execute(place_id: str, **_) -> Dict[str, Any]:
+        res = live_places.place_details(place_id)
+        if not res.get("ok"):
+            return {"success": False, "message": res.get("reason", "not found")}
+        return {"success": True, "restaurant": res.get("place")}
 
 
-class FilterRestaurantsTool:
-    """Filter restaurants by specific dietary and preference criteria"""
-
-    name = "filter_restaurants"
-    description = "Filter restaurants by dietary restrictions, amenities, and special requirements"
-
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "city": {
-                "type": "string",
-                "description": "City to search in"
-            },
-            "dietary_restrictions": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Dietary restrictions (e.g., 'Vegetarian', 'Vegan', 'Jain', 'Gluten-free')"
-            },
-            "family_friendly": {
-                "type": "boolean",
-                "description": "Must be family friendly with kids"
-            },
-            "wheelchair_accessible": {
-                "type": "boolean",
-                "description": "Must be wheelchair accessible"
-            },
-            "has_delivery": {
-                "type": "boolean",
-                "description": "Must have delivery option"
-            }
-        },
-        "required": ["city"]
-    }
-
-    @staticmethod
-    def execute(
-        city: str,
-        dietary_restrictions: List[str] = None,
-        family_friendly: bool = False,
-        wheelchair_accessible: bool = False,
-        has_delivery: bool = False
-    ) -> Dict[str, Any]:
-        """Execute filter restaurants"""
-        try:
-            restaurants = search_restaurants(city)
-
-            # Filter by dietary restrictions
-            if dietary_restrictions:
-                restaurants = [
-                    r for r in restaurants
-                    if r.matches_dietary_needs(dietary_restrictions)
-                ]
-
-            # Filter by family friendly
-            if family_friendly:
-                restaurants = [r for r in restaurants if r.is_family_friendly()]
-
-            # Filter by wheelchair accessible
-            if wheelchair_accessible:
-                restaurants = [r for r in restaurants if r.is_accessible()]
-
-            # Filter by delivery
-            if has_delivery:
-                restaurants = [r for r in restaurants if r.has_delivery()]
-
-            if not restaurants:
-                return {
-                    "success": False,
-                    "message": f"No restaurants found in {city} matching all criteria"
-                }
-
-            results = []
-            for restaurant in restaurants[:5]:
-                results.append({
-                    "id": restaurant.id,
-                    "name": restaurant.name,
-                    "cuisines": [c.value for c in restaurant.cuisine_types],
-                    "rating": restaurant.rating,
-                    "price_range": restaurant.price_range,
-                    "dietary_options": restaurant.dietary_options,
-                    "amenities": [a.name.value for a in restaurant.amenities if a.available],
-                    "suitable_for": {
-                        "family": restaurant.is_family_friendly(),
-                        "wheelchair": restaurant.is_accessible(),
-                        "delivery": restaurant.has_delivery()
-                    }
-                })
-
-            return {
-                "success": True,
-                "count": len(results),
-                "restaurants": results
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-
-
-class SemanticSearchRestaurantsTool:
-    """Semantic (meaning-based) restaurant search - finds restaurants
-    matching a natural-language description rather than only exact filters.
-
-    Complements search_restaurants; use this when the traveler describes
-    what they want in their own words (e.g. "romantic seafood dinner with a
-    view" or "cheap authentic street food").
-    """
-
-    name = "semantic_search_restaurants"
-    description = (
-        "Search restaurants by natural-language description or vibe (e.g. 'romantic "
-        "seafood dinner with a view') within a specific city, using semantic similarity "
-        "rather than only exact keyword filters. City is required - this tool only "
-        "searches within TRAVAS's verified dataset for that city."
-    )
-
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "city": {"type": "string", "description": "City to search within (required)"},
-            "query": {"type": "string", "description": "Natural-language description of what the traveler wants"},
-            "n_results": {"type": "integer", "description": "Max results to return", "default": 5},
-        },
-        "required": ["city", "query"],
-    }
-
-    @staticmethod
-    def execute(city: str, query: str, n_results: int = 5) -> Dict[str, Any]:
-        from tools.rag_helpers import run_semantic_search
-
-        def _format(restaurant, hit):
-            return {
-                "id": restaurant.id,
-                "name": restaurant.name,
-                "locality": restaurant.locality,
-                "cuisines": [c.value for c in restaurant.cuisine_types],
-                "rating": restaurant.rating,
-                "avg_cost_per_person": restaurant.avg_cost_per_person,
-                "why_matched": hit["document"][:200],
-            }
-
-        return run_semantic_search(
-            domain="restaurants",
-            query=query,
-            where={"city": city.strip().title()},
-            coverage_label=city,
-            n_results=n_results,
-            formatter=_format,
-        )
-
-
-# Export tools
 RESTAURANT_TOOLS = {
     "search_restaurants": SearchRestaurantsTool,
     "get_restaurant_details": GetRestaurantDetailsTool,
-    "filter_restaurants": FilterRestaurantsTool,
-    "semantic_search_restaurants": SemanticSearchRestaurantsTool,
 }
 
 
 def list_tools() -> List[str]:
-    """List available tools"""
     return list(RESTAURANT_TOOLS.keys())
