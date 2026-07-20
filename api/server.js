@@ -59,52 +59,34 @@ function getOrCreateSession(sessionId = null) {
 }
 
 /**
- * Call Python agent (subprocess)
+ * Call Python FastAPI Backend
  */
-function callPythonAgent(scriptName, args) {
-  return new Promise((resolve, reject) => {
-    const pythonPath = path.join(__dirname, '..', scriptName);
+async function callPythonBackend(endpoint, method = 'GET', body = null) {
+  const PYTHON_API = 'http://localhost:5000';
 
-    // Check if script exists
-    if (!fs.existsSync(pythonPath)) {
-      reject(new Error(`Python script not found: ${pythonPath}`));
-      return;
+  try {
+    const options = {
+      method: method,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    };
+
+    if (body) {
+      options.body = JSON.stringify(body);
     }
 
-    const python = spawn('python', [pythonPath, ...args], {
-      cwd: path.join(__dirname, '..')
-    });
+    const response = await fetch(`${PYTHON_API}${endpoint}`, options);
 
-    let stdout = '';
-    let stderr = '';
+    if (!response.ok) {
+      throw new Error(`Python API error: ${response.status}`);
+    }
 
-    python.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    python.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    python.on('close', (code) => {
-      if (code === 0) {
-        try {
-          const result = JSON.parse(stdout);
-          resolve(result);
-        } catch (e) {
-          resolve({ status: 'success', message: stdout });
-        }
-      } else {
-        reject(new Error(`Python error: ${stderr}`));
-      }
-    });
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      python.kill();
-      reject(new Error('Python script timeout'));
-    }, 30000);
-  });
+    return await response.json();
+  } catch (error) {
+    console.error('Python API call failed:', error);
+    throw error;
+  }
 }
 
 /**
@@ -159,25 +141,37 @@ app.post('/api/chat', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
-    // Call Python backend (Sanchalak orchestrator)
-    // In production, this would call a FastAPI endpoint instead
-    const response = {
-      role: 'assistant',
-      content: `[Sanchalak Response] Processing: "${message}"`,
-      timestamp: new Date().toISOString()
-    };
+    // Call Python backend API
+    try {
+      const pythonResponse = await callPythonBackend('/api/chat', 'POST', {
+        message: message,
+        session_id: sessionId
+      });
 
-    session.messages.push(response);
+      // Add assistant response to session
+      session.messages.push({
+        role: 'assistant',
+        content: pythonResponse.response,
+        timestamp: new Date().toISOString()
+      });
 
-    logInteraction(sessionId, 'assistant', response);
+      logInteraction(sessionId, 'assistant', pythonResponse);
 
-    return res.status(200).json({
-      session_id: sessionId,
-      message: message,
-      response: response.content,
-      approval_state: session.approval_state,
-      status: 'success'
-    });
+      return res.status(200).json({
+        session_id: sessionId,
+        message: message,
+        response: pythonResponse.response,
+        approval_state: pythonResponse.approval_state || session.approval_state,
+        status: 'success'
+      });
+
+    } catch (pythonError) {
+      console.error('Python backend error:', pythonError.message);
+      return res.status(503).json({
+        status: 'error',
+        message: 'Python backend not running. Start it with: python python_backend/api.py'
+      });
+    }
 
   } catch (error) {
     console.error('Chat error:', error);
@@ -227,69 +221,39 @@ app.post('/api/feedback', async (req, res) => {
 
     logInteraction(session_id, 'feedback', { action, feedback });
 
-    // Process feedback based on action
-    let result = {};
+    // Call Python backend API
+    try {
+      const pythonResponse = await callPythonBackend('/api/feedback', 'POST', {
+        session_id: session_id,
+        feedback: feedback,
+        action: action
+      });
 
-    if (action === 'approve') {
-      result = {
-        action: 'approve',
-        message: 'Itinerary approved and finalized!',
-        next_step: 'FINALIZE',
-        status: 'success'
-      };
-      session.approval_state = 'APPROVED';
-    } else if (action === 'revise') {
-      if (session.revision_count >= session.max_revisions) {
-        result = {
-          action: 'revise',
-          message: `Max revisions (${session.max_revisions}) reached`,
-          next_step: 'ESCALATE',
-          status: 'error'
-        };
-      } else {
-        session.revision_count++;
-        result = {
-          action: 'revise',
-          message: `Processing revision (Attempt ${session.revision_count}/${session.max_revisions})`,
-          next_step: 'SEND_TO_YOJANA',
-          status: 'success'
-        };
-      }
-    } else if (action === 'reject') {
-      result = {
-        action: 'reject',
-        message: 'Would you like to:\n1. Start fresh?\n2. Make specific changes?',
-        next_step: 'ASK_RESTART_STRATEGY',
-        status: 'clarify'
-      };
-      session.approval_state = 'REJECTED';
-    } else if (action === 'clarify') {
-      result = {
-        action: 'clarify',
-        message: 'What would you like to know about the itinerary?',
-        next_step: 'ANSWER_QUESTION',
-        status: 'info'
-      };
-    } else {
-      return res.status(400).json({
+      // Update local session state
+      session.approval_state = pythonResponse.approval_state;
+      session.revision_count = pythonResponse.revision_count || session.revision_count;
+
+      // Add to session messages
+      session.messages.push({
+        role: 'user',
+        content: feedback,
+        metadata: { action }
+      });
+
+      return res.status(200).json({
+        session_id: session_id,
+        ...pythonResponse,
+        approval_state: pythonResponse.approval_state,
+        revision_count: pythonResponse.revision_count
+      });
+
+    } catch (pythonError) {
+      console.error('Python backend error:', pythonError.message);
+      return res.status(503).json({
         status: 'error',
-        message: `Unknown action: ${action}`
+        message: 'Python backend not running'
       });
     }
-
-    // Add to session
-    session.messages.push({
-      role: 'user',
-      content: feedback,
-      metadata: { action }
-    });
-
-    return res.status(200).json({
-      session_id: session_id,
-      ...result,
-      approval_state: session.approval_state,
-      revision_count: session.revision_count
-    });
 
   } catch (error) {
     console.error('Feedback error:', error);
@@ -313,7 +277,7 @@ app.post('/api/feedback', async (req, res) => {
  *   created_at: string
  * }
  */
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
   try {
     const { session_id } = req.query;
 
@@ -331,18 +295,24 @@ app.get('/api/status', (req, res) => {
       });
     }
 
-    const session = sessions.get(session_id);
-
-    return res.status(200).json({
-      status: 'success',
-      session_id: session_id,
-      approval_state: session.approval_state,
-      revision_count: session.revision_count,
-      max_revisions: session.max_revisions,
-      message_count: session.messages.length,
-      created_at: session.created_at,
-      can_revise: session.revision_count < session.max_revisions
-    });
+    // Try to get from Python backend
+    try {
+      const pythonResponse = await callPythonBackend(`/api/status?session_id=${session_id}`);
+      return res.status(200).json(pythonResponse);
+    } catch (pythonError) {
+      // Fallback to local session
+      const session = sessions.get(session_id);
+      return res.status(200).json({
+        status: 'success',
+        session_id: session_id,
+        approval_state: session.approval_state,
+        revision_count: session.revision_count,
+        max_revisions: session.max_revisions,
+        message_count: session.messages.length,
+        created_at: session.created_at,
+        can_revise: session.revision_count < session.max_revisions
+      });
+    }
 
   } catch (error) {
     console.error('Status error:', error);
@@ -364,7 +334,7 @@ app.get('/api/status', (req, res) => {
  *   status: string
  * }
  */
-app.get('/api/itinerary', (req, res) => {
+app.get('/api/itinerary', async (req, res) => {
   try {
     const { session_id } = req.query;
 
@@ -382,15 +352,21 @@ app.get('/api/itinerary', (req, res) => {
       });
     }
 
-    const session = sessions.get(session_id);
-
-    return res.status(200).json({
-      status: 'success',
-      session_id: session_id,
-      itinerary: session.itinerary || { status: 'not_ready' },
-      approval_state: session.approval_state,
-      revision_count: session.revision_count
-    });
+    // Try to get from Python backend
+    try {
+      const pythonResponse = await callPythonBackend(`/api/itinerary?session_id=${session_id}`);
+      return res.status(200).json(pythonResponse);
+    } catch (pythonError) {
+      // Fallback to local session
+      const session = sessions.get(session_id);
+      return res.status(200).json({
+        status: 'success',
+        session_id: session_id,
+        itinerary: session.itinerary || { status: 'not_ready' },
+        approval_state: session.approval_state,
+        revision_count: session.revision_count
+      });
+    }
 
   } catch (error) {
     console.error('Itinerary error:', error);
@@ -412,7 +388,7 @@ app.get('/api/itinerary', (req, res) => {
  *   total_messages: number
  * }
  */
-app.get('/api/history', (req, res) => {
+app.get('/api/history', async (req, res) => {
   try {
     const { session_id } = req.query;
 
@@ -430,14 +406,20 @@ app.get('/api/history', (req, res) => {
       });
     }
 
-    const session = sessions.get(session_id);
-
-    return res.status(200).json({
-      status: 'success',
-      session_id: session_id,
-      messages: session.messages,
-      total_messages: session.messages.length
-    });
+    // Try to get from Python backend
+    try {
+      const pythonResponse = await callPythonBackend(`/api/history?session_id=${session_id}`);
+      return res.status(200).json(pythonResponse);
+    } catch (pythonError) {
+      // Fallback to local session
+      const session = sessions.get(session_id);
+      return res.status(200).json({
+        status: 'success',
+        session_id: session_id,
+        messages: session.messages,
+        total_messages: session.messages.length
+      });
+    }
 
   } catch (error) {
     console.error('History error:', error);
