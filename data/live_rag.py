@@ -1,38 +1,39 @@
-"""RAG over LIVE Google Places results - "build RAG with each search".
+"""Persistent RAG cache over LIVE search results - "learn from every search".
 
-Flow, per specialist search:
-  1. fetch real results from Google Places (data/live_places.py) for the
-     destination + domain (+ the traveler's specific need as the query text),
-  2. build a fresh, throwaway vector index over JUST those live results,
-  3. semantically retrieve the top-k against the traveler's need, so the ordering
-     reflects the nuance of what they asked for (e.g. "quiet romantic beachfront")
-     rather than only Google's default ranking,
-  4. return grounded, real results the specialist presents as verified.
+Upgrade of the earlier throwaway-per-search index into a PERSISTENT vector store
+that accumulates results across searches so future similar searches are served
+from the cache instead of re-hitting the paid live API.
 
-This replaces the old static mock dataset + prebuilt mock index. Coverage is now
-"whatever Google Places has" - i.e. effectively any destination - so the honesty
-rule shifts from "is this city in our tiny DB?" to "did the live search actually
-return results?". If it didn't (bad/absent key, quota, network, or genuinely no
-matches), callers get success=False with a plain reason and must tell the traveler
-they couldn't fetch verified data - never fill the gap from general knowledge.
+Per specialist search:
+  1. embed the traveler's need,
+  2. look in the persistent vector DB FIRST, filtered to the destination:
+       - CACHE HIT  -> return the semantically closest cached results, NO API call
+         (saves the Google/SearchApi call + the repeat tool-loop overhead),
+       - CACHE MISS -> call the live API, WRITE the new results into the cache
+         (so the next similar search is a hit), and return them.
+  3. either way, ranking is done by vector similarity to the need.
 
-The vector step degrades gracefully: if chromadb/its embedding model can't load,
-we simply return Google's own ranking (still real, still grounded) instead of
-failing. So the app works with or without the embedding layer.
+Concepts on display for the capstone: embeddings (chromadb's default model),
+a vector database (persistent chroma collection per domain), retrieval
+(similarity query with a metadata filter), and a concrete cache hit/miss +
+API-call-saved counter.
+
+Honest note on "token spend": the biggest saving is fewer paid API calls and
+avoided repeat tool loops; the specialist still receives the retrieved results
+as context, so per-search LLM tokens are similar. Everything degrades
+gracefully - if chromadb can't load, every search is a live call with no cache.
 """
 
+import os
+import json
 import logging
-import uuid
 from typing import Any, Dict, List, Optional
 
 from data import live_places
 
 logger = logging.getLogger(__name__)
 
-# domain -> (Places includedType, human noun used to build the query).
-# Transport is intentionally weak here: Google Places covers local venues
-# (stations, car rental) but NOT intercity flights/trains - see note in
-# safar's tool. A dedicated flights API (Amadeus/SerpApi) is a follow-up.
+# domain -> (Places includedType, human noun used to build the query)
 _DOMAIN_QUERY = {
     "hotels": ("lodging", "hotels"),
     "restaurants": ("restaurant", "restaurants"),
@@ -41,28 +42,53 @@ _DOMAIN_QUERY = {
     "transport": (None, "local transport options, car rental and transit"),
 }
 
-_chroma_client = None
+# A city needs at least this many cached records before we trust the cache to
+# serve that city without a fresh API call.
+_MIN_CACHE_HIT = 4
+_CACHE_PATH = os.getenv("RAG_CACHE_PATH", ".chroma_cache")
+
+_client = None
+_client_failed = False
+_stats = {"hits": 0, "misses": 0, "api_calls_saved": 0}
 
 
-def _get_chroma():
-    global _chroma_client
-    if _chroma_client is None:
+def _get_client():
+    """Persistent chroma client (survives restarts); falls back to ephemeral,
+    then to None (caching disabled) so the app always works."""
+    global _client, _client_failed
+    if _client is not None or _client_failed:
+        return _client
+    try:
         import chromadb
-        _chroma_client = chromadb.EphemeralClient()
-    return _chroma_client
+        try:
+            _client = chromadb.PersistentClient(path=_CACHE_PATH)
+        except Exception:
+            _client = chromadb.EphemeralClient()
+    except Exception as e:
+        logger.warning(f"RAG cache unavailable ({e}); every search will be a live call.")
+        _client_failed = True
+        _client = None
+    return _client
+
+
+def _collection(domain: str):
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        return client.get_or_create_collection(name=f"cache_{domain}")
+    except Exception as e:
+        logger.debug(f"cache collection error for {domain}: {e}")
+        return None
 
 
 def _document(p: Dict[str, Any]) -> str:
-    """Text blob embedded for one place (name + summary + types + reviews...)."""
     parts: List[str] = [p.get("name") or ""]
-    if p.get("summary"):
-        parts.append(str(p["summary"]))
+    for k in ("summary", "address", "price_level"):
+        if p.get(k):
+            parts.append(str(p[k]))
     if p.get("types"):
         parts.append(", ".join(p["types"]))
-    if p.get("address"):
-        parts.append(str(p["address"]))
-    if p.get("price_level"):
-        parts.append(f"price {p['price_level']}")
     if p.get("rating"):
         parts.append(f"rated {p['rating']} from {p.get('num_ratings')} reviews")
     for r in p.get("reviews", []):
@@ -71,96 +97,149 @@ def _document(p: Dict[str, Any]) -> str:
     return ". ".join(x for x in parts if x)
 
 
-def _rerank(places: List[Dict[str, Any]], need: str, n_results: int) -> List[Dict[str, Any]]:
-    """Vector re-rank live results against the traveler's need. Falls back to
-    the API's own order if the embedding layer is unavailable or anything fails.
-    """
-    if not need or not need.strip() or len(places) <= 1:
-        return places[:n_results]
-    keyed = {p["id"]: p for p in places if p.get("id")}
-    if not keyed:
-        return places[:n_results]
-    collection = None
-    client = None
-    name = f"live_{uuid.uuid4().hex}"
+def _city_cached_count(collection, city_key: str) -> int:
     try:
-        client = _get_chroma()
-        collection = client.create_collection(name=name)
-        collection.add(
-            ids=list(keyed.keys()),
-            documents=[_document(keyed[i]) for i in keyed],
+        got = collection.get(where={"city": city_key})
+        return len(got.get("ids") or [])
+    except Exception:
+        return 0
+
+
+def _query_cache(collection, city_key: str, need_text: str, n: int) -> List[Dict[str, Any]]:
+    try:
+        res = collection.query(
+            query_texts=[need_text],
+            n_results=n,
+            where={"city": city_key},
         )
-        res = collection.query(query_texts=[need], n_results=min(n_results, len(keyed)))
-        ordered_ids = (res.get("ids") or [[]])[0]
-        ranked = [keyed[i] for i in ordered_ids if i in keyed]
-        # Append any not returned by the query (safety) up to n_results.
-        for i in keyed:
-            if keyed[i] not in ranked:
-                ranked.append(keyed[i])
-        return ranked[:n_results]
+        metadatas = (res.get("metadatas") or [[]])[0]
+        out = []
+        for md in metadatas:
+            pj = (md or {}).get("place_json")
+            if pj:
+                try:
+                    out.append(json.loads(pj))
+                except Exception:
+                    continue
+        return out
     except Exception as e:
-        logger.debug(f"live RAG re-rank unavailable, using API order: {e}")
-        return places[:n_results]
-    finally:
-        # Keep the ephemeral client from accumulating one collection per search.
-        if client is not None:
-            try:
-                client.delete_collection(name=name)
-            except Exception:
-                pass
+        logger.debug(f"cache query error: {e}")
+        return []
 
 
-def search(
-    domain: str,
-    destination: str,
-    need: str = "",
-    n_results: int = 5,
-) -> Dict[str, Any]:
-    """Live-grounded search for one specialist.
+def _add_to_cache(collection, domain: str, city_key: str, places: List[Dict[str, Any]]) -> None:
+    try:
+        ids, docs, metas = [], [], []
+        for p in places:
+            pid = p.get("id")
+            if not pid:
+                continue
+            ids.append(pid)
+            docs.append(_document(p))
+            metas.append({"city": city_key, "domain": domain, "place_json": json.dumps(p)})
+        if ids:
+            collection.upsert(ids=ids, documents=docs, metadatas=metas)
+    except Exception as e:
+        logger.debug(f"cache add error: {e}")
 
-    Args:
-      domain: one of hotels/restaurants/attractions/shops/transport
-      destination: city/place the traveler is going to
-      need: the traveler's specific ask (vibe, cuisine, budget words, etc.) -
-            used both in the Places query and as the vector re-rank query
-      n_results: how many grounded results to return
 
-    Returns {"success": bool, "message": str, "results": [places], "reason": str?}.
+def search(domain: str, destination: str, need: str = "", n_results: int = 5) -> Dict[str, Any]:
+    """Live-grounded search with a persistent RAG cache in front of the API.
+
+    Returns {"success", "message", "results", "source": "cache"|"live", "reason"?}.
     """
     if not destination or not destination.strip():
-        return {"success": False, "message": "No destination is set yet - ask the traveler where they're going.", "results": []}
+        return {"success": False, "message": "No destination is set yet - ask the traveler where they're going.", "results": [], "source": "none"}
 
     included_type, noun = _DOMAIN_QUERY.get(domain, (None, domain))
-    query = " ".join(x for x in [need.strip(), noun, "in", destination.strip()] if x).strip()
+    city_key = destination.strip().title()
+    need_text = need.strip() or f"{noun} in {city_key}"
+    collection = _collection(domain)
 
-    fetched = live_places.text_search(query, included_type=included_type, max_results=15)
+    # 1) CACHE FIRST
+    if collection is not None and _city_cached_count(collection, city_key) >= _MIN_CACHE_HIT:
+        cached = _query_cache(collection, city_key, need_text, n_results)
+        if cached:
+            _stats["hits"] += 1
+            _stats["api_calls_saved"] += 1
+            return {
+                "success": True,
+                "source": "cache",
+                "message": (
+                    f"Found {len(cached)} verified {domain} result(s) for {city_key} from the "
+                    f"RAG cache (no API call needed - retrieved by semantic similarity)."
+                ),
+                "results": cached,
+            }
+
+    # 2) CACHE MISS -> live API
+    fetched = live_places.text_search(need_text, included_type=included_type, max_results=15)
     if not fetched.get("ok"):
         reason = fetched.get("reason", "unknown error")
         return {
             "success": False,
+            "source": "live",
             "reason": reason,
             "message": (
-                f"I couldn't fetch verified {domain} data for {destination} right now "
-                f"({reason}). Tell the traveler plainly you can't show verified results at "
-                f"the moment - do NOT answer from general knowledge."
+                f"I couldn't fetch verified {domain} data for {city_key} right now ({reason}). "
+                f"Tell the traveler plainly you can't show verified results at the moment - do "
+                f"NOT answer from general knowledge."
             ),
             "results": [],
         }
-
     places = fetched.get("places") or []
     if not places:
         return {
             "success": False,
+            "source": "live",
             "message": (
-                f"Google Places returned no {domain} results for {destination}. Tell the "
-                f"traveler plainly there were no verified matches - do NOT invent options."
+                f"Google Places returned no {domain} results for {city_key}. Tell the traveler "
+                f"plainly there were no verified matches - do NOT invent options."
             ),
             "results": [],
         }
 
-    results = _rerank(places, need, n_results)
+    _stats["misses"] += 1
+    if collection is not None:
+        _add_to_cache(collection, domain, city_key, places)
+        ranked = _query_cache(collection, city_key, need_text, n_results) or places[:n_results]
+    else:
+        ranked = places[:n_results]
+
     return {
         "success": True,
-        "message": f"Found {len(results)} verified {domain} result(s) for {destination} via Google Places.",
-        "results": results,
+        "source": "live",
+        "message": (
+            f"Found {len(ranked)} verified {domain} result(s) for {city_key} live via Google "
+            f"Places (cached now, so the next similar search won't need an API call)."
+        ),
+        "results": ranked,
+    }
+
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Hit/miss counters + per-domain cached-record counts, for the UI panel."""
+    per_domain = {}
+    total_cached = 0
+    for domain in _DOMAIN_QUERY:
+        col = _collection(domain)
+        if col is None:
+            continue
+        try:
+            c = col.count()
+        except Exception:
+            c = 0
+        per_domain[domain] = c
+        total_cached += c
+    hits = _stats["hits"]
+    misses = _stats["misses"]
+    total = hits + misses
+    return {
+        "hits": hits,
+        "misses": misses,
+        "api_calls_saved": _stats["api_calls_saved"],
+        "hit_rate": round(hits / total, 2) if total else 0.0,
+        "total_cached_records": total_cached,
+        "cached_by_domain": per_domain,
+        "cache_enabled": _get_client() is not None,
     }
