@@ -80,7 +80,7 @@ Your role is to:
 ## HOW YOU WORK
 
 PHASE 1: UNDERSTAND THE JOURNEY
-Ask about destination, dates, travelers, and trip type. Gather info naturally across 2-3 turns.
+Ask about destination, dates, travelers, and trip type. Gather info naturally, but ask only ONE question at a time - a single short question per message, then wait for the answer before asking the next.
 
 PHASE 2: IDENTIFY SPECIALISTS NEEDED
 Based on trip type, determine which agents help:
@@ -133,7 +133,7 @@ separately and will appear right after.
 
 ## CONVERSATION RULES
 
-✅ Ask 1-2 questions per turn
+✅ Ask EXACTLY ONE question per turn - never combine two questions into a single message
 ✅ Remember what they said earlier
 ✅ Acknowledge preferences and constraints
 ✅ Provide alternatives
@@ -853,6 +853,55 @@ Reply with exactly one word: YES or NO."""
             "specialist_status": dict(self.state_manager.get_state().get("agent_status", {})),
             "completed_specialists": self.state_manager.get_completed_specialists(),
         }
+
+    def suggest_replies(self, max_suggestions: int = 4) -> List[str]:
+        """Short tappable quick-reply options for the assistant's LATEST message.
+
+        Lets the UI render suggestion bubbles the traveler can tap instead of
+        typing (e.g. after "Who's going?" -> Solo / Couple / Family / Friends).
+        Returns [] when the latest message isn't asking something answerable with
+        a short choice (e.g. after specialist recommendations), so the UI simply
+        shows no bubbles. Kept out of get_view_state() because it makes its own
+        small LLM call - the UI caches the result per assistant message.
+        """
+        last_assistant = None
+        for m in reversed(self.messages):
+            if m.get("role") == "assistant":
+                last_assistant = str(m.get("content", ""))
+                break
+        if not last_assistant:
+            return []
+        try:
+            import json
+            prompt = (
+                "In a travel-planning chat, the assistant just said:\n\n"
+                f"\"{last_assistant[:800]}\"\n\n"
+                f"Propose up to {max_suggestions} SHORT quick-reply options (each 1-4 words) the "
+                "traveler could tap to answer the assistant's latest question. They must be "
+                "natural, distinct answers to what was actually asked (e.g. for 'who is going?' "
+                "-> [\"Solo\", \"Couple\", \"Family\", \"Friends\"]; for a yes/no offer -> "
+                "[\"Yes, go ahead\", \"Not yet\"]). If the assistant is NOT asking the traveler "
+                "something they'd answer with a short choice, return an empty array. "
+                "Return ONLY a JSON array of strings, no other text."
+            )
+            resp = self.client.messages.create(
+                model=self.model,
+                max_tokens=150,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+            match = re.search(r"\[.*\]", text, re.DOTALL)
+            if not match:
+                return []
+            items = json.loads(match.group(0))
+            out = []
+            for it in items:
+                if isinstance(it, str) and it.strip():
+                    out.append(it.strip()[:40])
+            return out[:max_suggestions]
+        except Exception as e:
+            logger.debug(f"suggest_replies error: {str(e)}")
+            return []
 
     def get_orchestrator_info(self) -> Dict:
         """Get orchestrator status"""
