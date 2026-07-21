@@ -455,20 +455,32 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
         if norm not in _AFFIRMATIVE_REPLIES and not any(w in _AFFIRMATIVE_REPLIES for w in words):
             return []
 
-        # Find the most recent assistant turn and confirm it was an OFFER.
+        # Find the most recent assistant turn.
         prev = None
         for turn in reversed(self.conversation_history):
             if turn.get("role") == "assistant":
                 prev = str(turn.get("content", "")).lower()
                 break
-        if not prev or not any(marker in prev for marker in _OFFER_MARKERS):
+        if not prev:
             return []
 
-        # Which specialists did that offer name?
+        # Only a genuine SANCHALAK offer counts. A routed specialist's own answer
+        # (prefixed "Let me check with my X specialist...") is NOT an offer, even
+        # though it may contain an offer-ish phrase and mention other domains in
+        # passing (e.g. a hotel writeup saying "great for your food interest,
+        # near Orchard shopping"). Treating that as an offer is exactly what made
+        # "i am ok" spuriously fan out to all five specialists.
+        if "let me check with my" in prev:
+            return []
+        if not any(marker in prev for marker in _OFFER_MARKERS):
+            return []
+
+        # Match ONLY specialist proper names (atithi, safar, ...), which is how
+        # Sanchalak's offers name them - NOT generic domain words like "food" or
+        # "shopping", which appear incidentally in specialists' answers.
         offered = []
         for name in available:
-            hints = _SPECIALIST_DOMAIN_HINTS.get(name, [name])
-            if any(re.search(r"\b" + re.escape(h) + r"\b", prev) for h in hints):
+            if re.search(r"\b" + re.escape(name) + r"\b", prev):
                 offered.append(name)
         if offered:
             logger.info(f"Affirmative-reoffer fallback routing to: {offered}")
