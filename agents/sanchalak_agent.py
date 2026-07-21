@@ -778,6 +778,10 @@ Reply with exactly one word: YES or NO."""
             }
             self.validation_result = self._run_validation(itinerary_text, prefs, deterministic_findings)
             self.approval_state = "CONDITIONAL"
+            # Populate the Traveller DNA radar as soon as a real itinerary exists
+            # (refreshed again on revise/approve), so it's visible without needing
+            # to approve first.
+            self.compute_traveller_dna()
         else:
             self.validation_result = None
             self.approval_state = "PENDING"
@@ -894,6 +898,7 @@ Reply with exactly one word: YES or NO."""
         }
         self.validation_result = self._run_validation(self.itinerary_text, prefs, deterministic_findings)
         self.approval_state = "CONDITIONAL"
+        self.compute_traveller_dna()  # refresh the radar for the revised plan
         self.messages.append({
             "role": "system",
             "content": (f"✅ Revision {self.revision_count}/{MAX_REVISIONS} complete — "
@@ -961,9 +966,35 @@ Reply with exactly one word: YES or NO."""
                     dna[dim] = max(0, min(100, int(data.get(dim, 0))))
                 except Exception:
                     dna[dim] = 0
-            self.traveller_dna = dna
+            if any(dna.values()):
+                self.traveller_dna = dna
+                return
         except Exception as e:
             logger.debug(f"compute_traveller_dna error: {str(e)}")
+
+        # Deterministic keyword fallback so the radar always populates once an
+        # itinerary exists, even if the scoring call failed or returned zeros.
+        self.traveller_dna = self._heuristic_dna(text, acts)
+
+    _DNA_KEYWORDS = {
+        "Culture": ["temple", "museum", "heritage", "historic", "culture", "art", "gallery", "little india", "chinatown", "old town"],
+        "Food": ["food", "restaurant", "hawker", "cuisine", "dining", "eat", "cafe", "street food", "satay", "market"],
+        "Adventure": ["adventure", "hike", "trek", "water sport", "dive", "zip", "theme park", "universal", "luge", "thrill", "cable car"],
+        "Nature": ["garden", "park", "beach", "nature", "wildlife", "zoo", "botanic", "island", "forest"],
+        "Luxury": ["luxury", "five-star", "5-star", "resort", "spa", "fine dining", "premium", "marina bay sands", "ritz", "fullerton"],
+        "Shopping": ["shop", "market", "mall", "souvenir", "bazaar", "orchard", "boutique"],
+        "Relaxation": ["relax", "spa", "leisure", "chill", "unwind", "stroll", "sunset", "quiet"],
+    }
+
+    def _heuristic_dna(self, text: str, acts: List[str]) -> Dict[str, int]:
+        """Rough 0-100 scores from keyword hits in the itinerary + interests."""
+        blob = (text + " " + " ".join(acts)).lower()
+        dna = {}
+        for dim, kws in self._DNA_KEYWORDS.items():
+            hits = sum(blob.count(k) for k in kws)
+            # 0 hits -> 15 (baseline), scale up with hits, cap at 100.
+            dna[dim] = int(max(15, min(100, 15 + hits * 18)))
+        return dna
 
     def get_debug_state(self) -> Dict[str, Any]:
         """Transparency snapshot: what the agents have actually captured and
