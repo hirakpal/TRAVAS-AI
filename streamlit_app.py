@@ -82,6 +82,28 @@ def reset_trip() -> None:
         st.session_state.sanchalak.reset()
     st.session_state.show_revise_input = False
     st.session_state.show_reject_options = False
+    st.session_state.pop("suggestion_cache", None)
+
+
+def _cached_suggestions(sanchalak, messages) -> list:
+    """Quick-reply suggestions for the latest assistant message, cached so the
+    LLM call behind them runs once per turn instead of on every rerun."""
+    last_assistant = None
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            last_assistant = m.get("content", "")
+            break
+    if not last_assistant:
+        return []
+    cache = st.session_state.get("suggestion_cache")
+    if cache and cache.get("key") == last_assistant:
+        return cache.get("items", [])
+    try:
+        items = sanchalak.suggest_replies()
+    except Exception:
+        items = []
+    st.session_state["suggestion_cache"] = {"key": last_assistant, "items": items}
+    return items
 
 
 # ============================================================================
@@ -223,8 +245,28 @@ with col1:
             else:
                 st.chat_message("assistant").write(message["content"])
 
+    # Quick-reply suggestion bubbles for the assistant's latest question. Cached
+    # per assistant message so the small LLM call behind them runs only once per
+    # turn, not on every Streamlit rerun. Tapping one sends it as a user message.
+    suggestions = _cached_suggestions(sanchalak, view["messages"])
+    if suggestions:
+        st.caption("💡 Quick replies")
+        scols = st.columns(len(suggestions))
+        for i, sug in enumerate(suggestions):
+            with scols[i]:
+                if st.button(sug, key=f"suggestion_{i}", use_container_width=True):
+                    st.session_state.pop("suggestion_cache", None)
+                    with st.spinner("🤖 Thinking..."):
+                        try:
+                            sanchalak.send_message(sug)
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                            logger.error(f"Chat error: {str(e)}")
+                    st.rerun()
+
     user_input = st.chat_input("Tell me about your dream trip...")
     if user_input:
+        st.session_state.pop("suggestion_cache", None)
         with st.spinner("🤖 Thinking..."):
             try:
                 sanchalak.send_message(user_input)
