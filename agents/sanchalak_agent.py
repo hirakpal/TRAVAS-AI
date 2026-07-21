@@ -205,6 +205,10 @@ separately and will appear right after.
         self.approval_state: str = "PENDING"
         self.revision_count: int = 0
 
+        # Set when a check-in date is newly resolved, so the next reply can echo
+        # the concrete date back to the traveler for confirmation.
+        self._pending_date_confirmation: Optional[str] = None
+
     def _extract_and_update_preferences(self, message: str) -> None:
         """Extract travel info from user message using Claude and update shared state.
 
@@ -236,7 +240,15 @@ separately and will appear right after.
                 f"{t['role']}: {str(t['content'])[:300]}" for t in recent_turns
             )
 
+            # The extractor MUST know today's date to resolve relative phrases
+            # like "this weekend" / "next Friday". Without it, the model has no
+            # anchor and guesses a wrong month (e.g. "this weekend" -> October).
+            today = datetime.now()
+            today_str = today.strftime("%A, %d %B %Y")
+
             extraction_prompt = f"""Extract travel planning details from the user's message below. Return ONLY a valid JSON object, no other text, no markdown code fences.
+
+Today's date is {today_str}. Resolve ANY relative or informal date in the message ("this weekend", "next weekend", "next Friday", "tomorrow", "in 2 weeks", "end of the month", "first week of March") to an ACTUAL calendar date relative to today. "This weekend" = the upcoming Saturday. Never guess an unrelated month.
 
 Already known info (do not repeat unless it changed): {json.dumps(known)}
 
@@ -250,7 +262,7 @@ Return a JSON object with ONLY the NEW or UPDATED fields found in this message (
   "destination": "city/place name if mentioned (e.g. Delhi, Goa, Jaipur)",
   "source_city": "departure/origin city if mentioned",
   "accommodation_area": "specific neighborhood/area for stay if mentioned (e.g. North Goa, Candolim)",
-  "checkin_date": "date in 'DD Mon' format if mentioned, e.g. '25 Jul'",
+  "checkin_date": "the check-in/start date as 'DD Mon' (e.g. '25 Jul'), resolved to an ACTUAL date using today's date above for any relative phrase",
   "num_days": integer trip duration in days if mentioned,
   "num_adults": integer count of adult travelers if determinable from context,
   "num_children": integer count of children if mentioned,
@@ -288,12 +300,33 @@ Rules:
             if not extracted:
                 return
 
+            # If a check-in date was newly resolved this turn, stash a friendly
+            # form (with weekday) so route_query can confirm the concrete date
+            # back - the traveler may have said something relative ("this
+            # weekend") that we interpreted, and should get a chance to correct.
+            newly_checkin = extracted.get("checkin_date")
+            if newly_checkin:
+                try:
+                    _y = datetime.now().year
+                    _d = datetime.strptime(f"{newly_checkin} {_y}", "%d %b %Y")
+                    if _d.date() < datetime.now().date():
+                        _d = _d.replace(year=_y + 1)
+                    self._pending_date_confirmation = _d.strftime("%A, %d %b %Y")
+                except Exception:
+                    self._pending_date_confirmation = str(newly_checkin)
+
             # Calculate checkout_date if we now know checkin_date + num_days
             checkin_str = extracted.get("checkin_date") or current_prefs.get("checkin_date")
             num_days = extracted.get("num_days") or current_prefs.get("num_days")
             if checkin_str and num_days:
                 try:
-                    checkin_date = datetime.strptime(f"{checkin_str} 2026", "%d %b %Y")
+                    # Use the current year, not a hardcoded one; if that date has
+                    # already passed (a trip can't be in the past), roll to next
+                    # year - e.g. today is December, trip is in January.
+                    year = datetime.now().year
+                    checkin_date = datetime.strptime(f"{checkin_str} {year}", "%d %b %Y")
+                    if checkin_date.date() < datetime.now().date():
+                        checkin_date = checkin_date.replace(year=year + 1)
                     checkout_date = checkin_date + timedelta(days=int(num_days))
                     extracted["checkout_date"] = checkout_date.strftime("%d %b").lstrip("0")
                 except Exception:
@@ -501,6 +534,10 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
             if not routing_intents:
                 routing_intents = self._affirmative_reoffer_fallback(message)
 
+            # If we just resolved a check-in date, confirm the concrete date back.
+            date_confirm = self._pending_date_confirmation
+            self._pending_date_confirmation = None
+
             if routing_intents:
                 # Route to each identified specialist for real, and concatenate
                 # their GENUINE responses. Never synthesize this content ourselves.
@@ -509,6 +546,8 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
                     specialist_response = self._route_to_specialist(agent_name, message)
                     response_parts.append(f"Let me check with my {agent_name} specialist...\n\n{specialist_response}")
                 response = "\n\n---\n\n".join(response_parts)
+                if date_confirm:
+                    response = f"📅 Just to confirm, I've got your check-in as **{date_confirm}** — let me know if that's not right.\n\n---\n\n{response}"
 
                 # Update shared state
                 self.state_manager.add_message("assistant", response, agent="sanchalak")
@@ -521,11 +560,21 @@ Return ONLY a JSON array of specialist names, e.g. ["safar", "atithi"] or []. No
                 self.conversation_history.append({"role": "assistant", "content": response})
                 return response
             else:
-                # Chat naturally without routing
+                # Chat naturally without routing. If we just resolved a date,
+                # tell Sanchalak to confirm the concrete date in its reply so the
+                # traveler can catch a misread of a relative phrase.
+                system_prompt = self.SYSTEM_PROMPT
+                if date_confirm:
+                    system_prompt += (
+                        f"\n\nIMPORTANT FOR THIS REPLY: you interpreted the traveler's travel "
+                        f"date as {date_confirm}. Briefly confirm this exact date back to them "
+                        f"(e.g. \"Just to confirm - checking in {date_confirm}?\") so they can "
+                        f"correct it if it's wrong, then continue naturally."
+                    )
                 claude_response = self.client.messages.create(
                     model=self.model,
                     max_tokens=1024,
-                    system=self.SYSTEM_PROMPT,
+                    system=system_prompt,
                     messages=self.conversation_history
                 )
 
@@ -980,6 +1029,7 @@ Reply with exactly one word: YES or NO."""
         self.structured_validation_warnings = []
         self.approval_state = "PENDING"
         self.revision_count = 0
+        self._pending_date_confirmation = None
 
         logger.info("Sanchalak orchestrator reset (full trip)")
 
