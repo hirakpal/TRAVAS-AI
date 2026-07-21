@@ -171,13 +171,36 @@ class BaseAgent(ABC):
         """
         try:
             from data import live_places
-            if live_places.is_configured():
-                return None
+            if not live_places.is_configured():
+                return (
+                    f"\n\n[LIVE DATA UNAVAILABLE - no Google Places API key is configured, so you "
+                    f"cannot fetch verified {domain} data right now. Tell the traveler plainly that "
+                    f"you can't pull verified {domain} results at the moment; do NOT answer from "
+                    f"general knowledge as if it were verified.]"
+                )
+            # Key present: actively override any stale "limited dataset / only
+            # cover city X" framing left in the system prompt. You can search
+            # LIVE data for ANY destination now, so never refuse up front.
+            state_manager = getattr(self, "state_manager", None)
+            dest = ""
+            if state_manager is not None:
+                try:
+                    dest = (state_manager.get_preferences().get("destination") or "").strip()
+                except Exception:
+                    dest = ""
+            where = f" for {dest}" if dest else ""
             return (
-                f"\n\n[LIVE DATA UNAVAILABLE - no Google Places API key is configured, so you "
-                f"cannot fetch verified {domain} data right now. Tell the traveler plainly that "
-                f"you can't pull verified {domain} results at the moment; do NOT answer from "
-                f"general knowledge as if it were verified.]"
+                f"\n\n[LIVE SEARCH ENABLED - you can retrieve verified {domain} data for ANY "
+                f"destination worldwide via your search tool; you do NOT have a fixed list of "
+                f"covered cities, so never refuse a destination. IGNORE any 'gather everything "
+                f"before searching' phase rules: as soon as a destination is known, CALL your "
+                f"search tool NOW{where} using whatever you already know (pass the traveler's "
+                f"stated preferences as the free-text query), and PRESENT the real results first. "
+                f"Do NOT run a long multi-question intake. Ask AT MOST ONE short question at a "
+                f"time, and only when you genuinely need it - prefer to show results, then offer "
+                f"to refine. NEVER claim a destination 'isn't in your verified dataset' without "
+                f"searching. Only if the tool returns no results or an error do you say you "
+                f"couldn't fetch verified data.]"
             )
         except Exception as e:
             logger.debug(f"_coverage_directive({domain}) error: {str(e)}")
