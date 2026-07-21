@@ -39,6 +39,9 @@ MAX_REVISIONS = 3
 
 WELCOME_MESSAGE = "Welcome to TRAVAS-AI! Tell me about your dream trip."
 
+# Dimensions scored for the "Traveller DNA" radar, computed when a trip is finalized.
+DNA_DIMENSIONS = ["Culture", "Food", "Adventure", "Nature", "Luxury", "Shopping", "Relaxation"]
+
 # Deterministic backup for routing when the LLM intent classifier misses a bare
 # affirmative reply to a specialist offer (e.g. "yes" answering "Shall I bring in
 # Safar and Atithi?"). See _affirmative_reoffer_fallback.
@@ -208,6 +211,9 @@ separately and will appear right after.
         # Set when a check-in date is newly resolved, so the next reply can echo
         # the concrete date back to the traveler for confirmation.
         self._pending_date_confirmation: Optional[str] = None
+
+        # Traveller DNA radar scores, computed when the trip is finalized.
+        self.traveller_dna: Optional[Dict[str, int]] = None
 
     def _extract_and_update_preferences(self, message: str) -> None:
         """Extract travel info from user message using Claude and update shared state.
@@ -796,6 +802,8 @@ Reply with exactly one word: YES or NO."""
 
         self.feedback_handler.process_user_feedback("I approve this itinerary.", self.itinerary)
         self.approval_state = "APPROVED"
+        # Finalization updates the Traveller DNA radar from the approved trip.
+        self.compute_traveller_dna()
         self.messages.append({
             "role": "system",
             "content": "✅ Itinerary approved and finalized! Ready for booking.",
@@ -901,6 +909,75 @@ Reply with exactly one word: YES or NO."""
             # derived readiness the gate uses.
             "specialist_status": dict(self.state_manager.get_state().get("agent_status", {})),
             "completed_specialists": self.state_manager.get_completed_specialists(),
+            "traveller_dna": self.traveller_dna,
+        }
+
+    def compute_traveller_dna(self) -> None:
+        """Score the finalized trip across DNA_DIMENSIONS (0-100 each) for the
+        Traveller DNA radar. Called on finalization; safe no-op on any error."""
+        text = self.itinerary_text or ""
+        try:
+            prefs = self.state_manager.get_preferences()
+        except Exception:
+            prefs = {}
+        acts = prefs.get("preferred_activities") or []
+        if not text and not acts:
+            return
+        try:
+            import json
+            prompt = (
+                "Score this traveler's trip on each dimension from 0-100 by how strongly the "
+                "itinerary and their stated interests emphasise it (0 = not at all, 100 = "
+                "dominant theme).\n\n"
+                f"Stated interests: {', '.join(acts) if acts else 'not specified'}\n\n"
+                f"Itinerary:\n{text[:3000]}\n\n"
+                f"Dimensions: {', '.join(DNA_DIMENSIONS)}.\n"
+                "Return ONLY a JSON object mapping each dimension name to an integer 0-100."
+            )
+            resp = self.client.messages.create(
+                model=self.model, max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            t = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+            m = re.search(r"\{.*\}", t, re.DOTALL)
+            if not m:
+                return
+            data = json.loads(m.group(0))
+            dna = {}
+            for dim in DNA_DIMENSIONS:
+                try:
+                    dna[dim] = max(0, min(100, int(data.get(dim, 0))))
+                except Exception:
+                    dna[dim] = 0
+            self.traveller_dna = dna
+        except Exception as e:
+            logger.debug(f"compute_traveller_dna error: {str(e)}")
+
+    def get_debug_state(self) -> Dict[str, Any]:
+        """Transparency snapshot: what the agents have actually captured and
+        produced, plus RAG cache stats. Rendered in the 'Agent Data' panel."""
+        try:
+            prefs = {k: v for k, v in self.state_manager.get_preferences().items() if v is not None}
+        except Exception:
+            prefs = {}
+        try:
+            responses = self.state_manager.get_state().get("agent_responses", {})
+            response_summary = {
+                name: (str(resp)[:160] + "…") if resp and len(str(resp)) > 160 else str(resp)
+                for name, resp in responses.items()
+            }
+        except Exception:
+            response_summary = {}
+        try:
+            from data import live_rag
+            cache_stats = live_rag.get_cache_stats()
+        except Exception:
+            cache_stats = {}
+        return {
+            "preferences": prefs,
+            "agent_status": dict(self.state_manager.get_state().get("agent_status", {})),
+            "agent_responses": response_summary,
+            "cache_stats": cache_stats,
         }
 
     def suggest_replies(self, max_suggestions: int = 4) -> List[str]:
@@ -1030,6 +1107,7 @@ Reply with exactly one word: YES or NO."""
         self.approval_state = "PENDING"
         self.revision_count = 0
         self._pending_date_confirmation = None
+        self.traveller_dna = None
 
         logger.info("Sanchalak orchestrator reset (full trip)")
 
